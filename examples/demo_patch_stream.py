@@ -18,6 +18,7 @@ def main() -> None:
     p.add_argument("--patch", type=int, default=14)
     p.add_argument("--topk", type=int, default=512)
     p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32", "bfloat16", "float16", "float32"])
+    p.add_argument("--backend", choices=["auto", "gpu", "cpu"], default="auto")
     p.add_argument("--out-dir", default="patch_viz")
     args = p.parse_args()
 
@@ -28,6 +29,7 @@ def main() -> None:
         patch_size=args.patch,
         k_keep=args.topk,
         output_dtype=args.dtype,
+        backend=args.backend,
     )
 
     print(f"Total selected patches: {len(s)}")

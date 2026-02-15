@@ -45,6 +45,7 @@ def _sync(device_id: int) -> None:
 def _measure_prepare(
     fn: Callable[[], int],
     device_id: int,
+    cuda_sync: bool,
     repeats: int,
     warmup: int,
 ) -> BenchResult:
@@ -52,10 +53,12 @@ def _measure_prepare(
     selected_patches: int | None = None
 
     for i in range(warmup + repeats):
-        _sync(device_id)
+        if cuda_sync:
+            _sync(device_id)
         t0 = time.perf_counter()
         cur_patches = fn()
-        _sync(device_id)
+        if cuda_sync:
+            _sync(device_id)
         dt = time.perf_counter() - t0
 
         if i >= warmup:
@@ -81,6 +84,7 @@ def _build_stream(args: argparse.Namespace) -> CodecPatchStream:
         static_uniform_frames=args.static_uniform_frames,
         output_dtype=args.dtype,
         device_id=args.device_id,
+        backend=args.backend,
     )
 
 
@@ -237,6 +241,7 @@ def _print_selected_params(args: argparse.Namespace) -> None:
     _section("Selected Params")
     rows = [
         ("device_id", str(args.device_id)),
+        ("backend", str(args.backend)),
         ("sequence_length", str(args.frames)),
         ("input_size", str(args.input_size)),
         ("patch_size", str(args.patch)),
@@ -267,6 +272,7 @@ def main() -> None:
     p.add_argument("--prepare-repeats", type=int, default=5)
     p.add_argument("--prepare-warmup", type=int, default=1)
     p.add_argument("--device-id", type=int, default=0)
+    p.add_argument("--backend", choices=["auto", "gpu", "cpu"], default="auto")
 
     p.add_argument("--static-fallback", action="store_true")
     p.add_argument("--static-abs-thresh", type=float, default=2.0)
@@ -278,16 +284,26 @@ def main() -> None:
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. This benchmark requires a working GPU runtime.")
     if args.prepare_repeats <= 0:
         raise ValueError("prepare-repeats must be > 0")
     if args.prepare_warmup < 0:
         raise ValueError("prepare-warmup must be >= 0")
 
-    torch.cuda.set_device(args.device_id)
+    if args.backend == "gpu":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available but backend=gpu was requested.")
+        cuda_sync = True
+        torch.cuda.set_device(args.device_id)
+        device_label = f"cuda:{args.device_id}"
+    elif args.backend == "cpu":
+        cuda_sync = False
+        device_label = "cpu"
+    else:
+        cuda_sync = False
+        device_label = "auto (runtime selected)"
+
     _section("CodecPatchStream Benchmark")
-    print(f"Device: cuda:{args.device_id}")
+    print(f"Device: {device_label}")
     _print_video_info(_probe_video_info(video_path))
     _print_selected_params(args)
 
@@ -301,6 +317,7 @@ def main() -> None:
     result = _measure_prepare(
         fn=bench_prepare_once,
         device_id=args.device_id,
+        cuda_sync=cuda_sync,
         repeats=args.prepare_repeats,
         warmup=args.prepare_warmup,
     )

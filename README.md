@@ -1,10 +1,11 @@
 # Video Patch Streaming
 
-`CodecPatchStream` exposes a native C++/CUDA video-to-patch iterator:
+`CodecPatchStream` exposes a native C++ video-to-patch iterator with CPU/GPU backends:
 
 - input: H.264/H.265 video path
-- output: iterable stream of selected ViT patches on CUDA
-- pipeline: NVDEC decode -> GPU block-matching MV proxy + compensation residual proxy (estimated) -> fused energy -> static fallback (optional) -> global Top-K (I-frame first) -> patch extract
+- output: iterable stream of selected ViT patches on the selected device
+- GPU pipeline: NVDEC decode -> GPU block-matching MV proxy + compensation residual proxy (estimated) -> fused energy -> static fallback (optional) -> global Top-K (I-frame first) -> patch extract
+- CPU pipeline: FFmpeg software decode -> CPU block-matching MV proxy + compensation residual proxy -> fused energy -> static fallback (optional) -> global Top-K (I-frame first) -> patch extract
 
 > NOTE: As NVDEC doesn't expose motion vectors or residuals, we use block-matching on the decoded frames as a estimated proxy, which is much faster than optical flow and can be done on the GPU.
 
@@ -17,20 +18,24 @@
 
 ## Build prerequisites
 
-- NVIDIA GPU + CUDA toolkit (`nvcc`)
 - FFmpeg dev headers/libraries:
   - `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev`
-- NVCodec headers (e.g. `nv-codec-headers` -> `/usr/local/include/ffnvcodec`)
+- Optional GPU prerequisites:
+  - NVIDIA GPU + CUDA toolkit (`nvcc`)
+  - NVCodec headers (e.g. `nv-codec-headers` -> `/usr/local/include/ffnvcodec`)
 
 ## Install with uv
 
 ```bash
 uv venv .venv
 
-# torch runtime (CUDA build)
+# torch runtime
 uv pip install --python .venv/bin/python torch
 
-# build native extension
+# build CPU backend only (works without nvcc/GPU)
+CODEC_BUILD_NATIVE=1 CODEC_ENABLE_GPU=0 uv pip install -e . --python .venv/bin/python --no-build-isolation
+
+# build CPU + GPU backend (if nvcc is available; default CODEC_ENABLE_GPU=auto)
 CODEC_BUILD_NATIVE=1 uv pip install -e . --python .venv/bin/python --no-build-isolation
 ```
 
@@ -51,18 +56,19 @@ stream = CodecPatchStream(
     static_uniform_frames=4,
     # global top-k with I-frame priority
     output_dtype="bf16",
+    backend="auto",         # auto | gpu | cpu
 )
 
 for patch, meta in stream:
-    # patch: (3, 14, 14) bf16 CUDA tensor
+    # patch: (3, 14, 14) bf16 tensor on selected backend device
     # meta: seq_pos/frame_id/is_i/patch idx/score
     pass
 
-# GPU-first metadata fast path (no eager CPU metadata materialization)
+# Metadata tensor fast path
 patches, meta_fields, meta_scores = stream.next_n_tensors(256)
-# meta_fields: int64 CUDA tensor (N, 6)
+# meta_fields: int64 tensor (N, 6) on selected backend device
 # columns: [seq_pos, frame_id, is_i, patch_linear_idx, patch_h_idx, patch_w_idx]
-# meta_scores: float32 CUDA tensor (N,)
+# meta_scores: float32 tensor (N,)
 
 # full metadata tensors for all selected patches
 all_meta_fields, all_meta_scores = stream.metadata_tensors
@@ -73,7 +79,7 @@ all_meta_fields, all_meta_scores = stream.metadata_tensors
 ```bash
 python examples/demo_patch_stream.py ./assets/demo.mp4 \
     --frames 16 --input-size 224 --patch 14 --topk 1024 --dtype bf16 \
-    --out-dir patch_viz
+    --backend auto --out-dir patch_viz
 ```
 
 ## Benchmark
@@ -81,5 +87,5 @@ python examples/demo_patch_stream.py ./assets/demo.mp4 \
 ```bash
 python examples/benchmark.py ./assets/demo.mp4 \
     --frames 16 --input-size 224 --patch 14 --topk 1024 --dtype bf16 \
-    --prepare-repeats 5 --prepare-warmup 1
+    --backend auto --prepare-repeats 5 --prepare-warmup 1
 ```

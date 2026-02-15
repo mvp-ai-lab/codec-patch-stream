@@ -1,4 +1,4 @@
-"""High-throughput GPU video patch stream API."""
+"""Video patch stream API with GPU/CPU native backends."""
 
 from .stream import CodecPatchStream
 

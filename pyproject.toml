@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codec-patch-stream"
-version = "0.2.0"
-description = "GPU-native video patch stream loader"
+version = "0.3.0"
+description = "Video patch stream loader with CPU/GPU native backends"
 readme = "README.md"
 requires-python = ">=3.10"
 

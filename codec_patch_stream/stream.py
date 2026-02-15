@@ -4,11 +4,11 @@ from typing import Dict, Iterator, List, Tuple
 
 import torch
 
-from .native_backend import require_native_backend
+from .native_backend import load_native_backend
 
 
 class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool]]]):
-    """Thin Python wrapper over the native C++/CUDA stream engine."""
+    """Thin Python wrapper over the native C++ stream engine (GPU/CPU backends)."""
 
     def __init__(
         self,
@@ -25,8 +25,9 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
         output_dtype: str = "bfloat16",
         device_id: int = 0,
         prefetch_depth: int = 3,
+        backend: str = "auto",
     ):
-        native = require_native_backend()
+        native = load_native_backend(backend)
         self._native = native.CodecPatchStreamNative(
             video_path=video_path,
             sequence_length=int(sequence_length),
