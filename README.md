@@ -11,8 +11,8 @@
 ## Preview
 
 <div style="display: flex; gap: 10px;">
-    <img src="./assets/demo.gif" style="height: 300px;" />
-    <img src="./assets/output.gif" style="height: 300px;" />
+    <img src="./assets/demo.gif" style="height: 300px; width: 300px;" />
+    <img src="./assets/output.gif" style="height: 300px; width: 300px;" />
 </div>
 
 ## Build prerequisites
