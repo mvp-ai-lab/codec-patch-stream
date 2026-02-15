@@ -109,6 +109,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         }
         return out;
       })
+      .def_property_readonly("metadata_tensors",
+                             [](codec_patch_stream::CodecPatchStreamNative& self) {
+                               return py::make_tuple(self.metadata_fields_gpu(),
+                                                     self.metadata_scores_gpu());
+                             })
       .def("next_n", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
         auto out = self.next_n(n);
         py::list metas;
@@ -116,6 +121,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           metas.append(meta_to_dict(m));
         }
         return py::make_tuple(std::get<0>(out), metas);
+      })
+      .def("next_n_tensors", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
+        auto out = self.next_n_tensors(n);
+        return py::make_tuple(std::get<0>(out), std::get<1>(out), std::get<2>(out));
       })
       .def("__iter__", [](codec_patch_stream::CodecPatchStreamNative& self)
                           -> codec_patch_stream::CodecPatchStreamNative& { return self; },

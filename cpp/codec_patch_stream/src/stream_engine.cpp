@@ -44,6 +44,38 @@ at::Tensor normalize_per_frame_percentile_cuda(const at::Tensor& maps, double pc
   return (maps / denom).clamp(0.0f, 1.0f).contiguous();
 }
 
+std::vector<PatchMeta> build_patch_meta_from_cpu_tensors(const at::Tensor& fields_cpu,
+                                                          const at::Tensor& scores_cpu) {
+  TORCH_CHECK(fields_cpu.scalar_type() == at::kLong,
+              "metadata fields must be int64 on CPU");
+  TORCH_CHECK(scores_cpu.scalar_type() == at::kFloat,
+              "metadata scores must be float32 on CPU");
+  TORCH_CHECK(fields_cpu.dim() == 2 && fields_cpu.size(1) == 6,
+              "metadata fields must have shape (N,6)");
+  TORCH_CHECK(scores_cpu.dim() == 1 && scores_cpu.size(0) == fields_cpu.size(0),
+              "metadata scores must have shape (N)");
+
+  const int64_t n = fields_cpu.size(0);
+  std::vector<PatchMeta> out;
+  out.reserve(static_cast<size_t>(n));
+
+  auto fields_ptr = fields_cpu.data_ptr<int64_t>();
+  auto scores_ptr = scores_cpu.data_ptr<float>();
+  for (int64_t i = 0; i < n; ++i) {
+    const int64_t* row = fields_ptr + i * 6;
+    PatchMeta m;
+    m.seq_pos = row[0];
+    m.frame_id = row[1];
+    m.is_i = row[2] != 0;
+    m.patch_linear_idx = row[3];
+    m.patch_h_idx = row[4];
+    m.patch_w_idx = row[5];
+    m.score = scores_ptr[i];
+    out.push_back(m);
+  }
+  return out;
+}
+
 }  // namespace
 
 at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
@@ -181,36 +213,44 @@ void CodecPatchStreamNative::prepare() {
   patch_bank_ = patches_f32.to(cfg_.output_dtype);
 
   meta_.clear();
+  metadata_cached_ = false;
   const int64_t ppf = selection.hb * selection.wb;
+  auto long_opts = torch::TensorOptions()
+                       .dtype(at::kLong)
+                       .device(torch::Device(torch::kCUDA, cfg_.device_id));
+  auto cuda_device = torch::Device(torch::kCUDA, cfg_.device_id);
 
-  auto vis_cpu = selection.visible_indices.to(torch::kCPU, /*non_blocking=*/false).contiguous();
-  auto selected_scores_cpu = selection.scores_flat.index_select(0, selection.visible_indices)
-                                 .to(torch::kCPU, /*non_blocking=*/false)
-                                 .contiguous();
+  auto visible = selection.visible_indices.contiguous();
+  const int64_t t = static_cast<int64_t>(decoded.sampled_frame_ids.size());
+  auto patch_frames = torch::arange(t, long_opts).repeat_interleave(ppf).contiguous();
+  auto seq_pos = patch_frames.index_select(0, visible);
 
-  const int64_t n = vis_cpu.numel();
-  meta_.reserve(static_cast<size_t>(n));
+  auto rem = visible.remainder(ppf);
+  auto patch_h_lut = torch::arange(selection.hb, long_opts)
+                         .repeat_interleave(selection.wb)
+                         .contiguous();
+  auto patch_w_lut = torch::arange(selection.wb, long_opts).repeat({selection.hb}).contiguous();
+  auto ph_idx = patch_h_lut.index_select(0, rem);
+  auto pw_idx = patch_w_lut.index_select(0, rem);
 
-  auto vis_ptr = vis_cpu.data_ptr<int64_t>();
-  auto score_ptr = selected_scores_cpu.data_ptr<float>();
+  auto frame_ids_cpu = torch::from_blob(const_cast<int64_t*>(decoded.sampled_frame_ids.data()),
+                                        {t},
+                                        torch::TensorOptions().dtype(at::kLong))
+                           .clone();
+  auto frame_ids_gpu = frame_ids_cpu.to(cuda_device).contiguous();
+  auto frame_ids = frame_ids_gpu.index_select(0, seq_pos);
 
-  for (int64_t i = 0; i < n; ++i) {
-    const int64_t idx = vis_ptr[i];
-    const int64_t seq_pos = idx / ppf;
-    const int64_t rem = idx % ppf;
-    const int64_t ph_idx = rem / selection.wb;
-    const int64_t pw_idx = rem % selection.wb;
+  auto is_i_cpu = torch::from_blob(const_cast<uint8_t*>(decoded.is_i_positions.data()),
+                                   {t},
+                                   torch::TensorOptions().dtype(at::kByte))
+                      .clone();
+  auto is_i_gpu = is_i_cpu.to(cuda_device).toType(at::kLong).contiguous();
+  auto is_i = is_i_gpu.index_select(0, seq_pos);
 
-    PatchMeta m;
-    m.seq_pos = seq_pos;
-    m.frame_id = decoded.sampled_frame_ids[static_cast<size_t>(seq_pos)];
-    m.is_i = decoded.is_i_positions[static_cast<size_t>(seq_pos)] != 0;
-    m.patch_linear_idx = idx;
-    m.patch_h_idx = ph_idx;
-    m.patch_w_idx = pw_idx;
-    m.score = score_ptr[i];
-    meta_.push_back(m);
-  }
+  metadata_fields_gpu_ =
+      torch::stack({seq_pos, frame_ids, is_i, visible, ph_idx, pw_idx}, 1).contiguous();
+  metadata_scores_gpu_ =
+      selection.scores_flat.index_select(0, visible).toType(at::kFloat).contiguous();
 
   cursor_ = 0;
   closed_ = false;
@@ -231,9 +271,12 @@ std::tuple<at::Tensor, PatchMeta> CodecPatchStreamNative::next() {
   if (!has_next()) {
     throw std::out_of_range("patch stream exhausted");
   }
+  if (!metadata_cached_) {
+    materialize_metadata_cpu_cache();
+  }
   const int64_t i = cursor_;
   ++cursor_;
-  return std::make_tuple(patch_bank_.index({i}), meta_[static_cast<size_t>(i)]);
+  return std::make_tuple(patch_bank_.index({i}), meta_.at(static_cast<size_t>(i)));
 }
 
 std::tuple<at::Tensor, std::vector<PatchMeta>> CodecPatchStreamNative::next_n(int64_t n) {
@@ -247,23 +290,92 @@ std::tuple<at::Tensor, std::vector<PatchMeta>> CodecPatchStreamNative::next_n(in
 
   const int64_t end = std::min<int64_t>(size(), cursor_ + n);
   auto patches = patch_bank_.slice(0, cursor_, end);
-  std::vector<PatchMeta> metas(meta_.begin() + cursor_, meta_.begin() + end);
+  std::vector<PatchMeta> metas;
+  if (metadata_cached_) {
+    metas = std::vector<PatchMeta>(meta_.begin() + cursor_, meta_.begin() + end);
+  } else {
+    metas = metadata_slice_cpu(cursor_, end);
+  }
   cursor_ = end;
   return std::make_tuple(patches, std::move(metas));
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> CodecPatchStreamNative::next_n_tensors(int64_t n) {
+  if (n <= 0 || !patch_bank_.defined() || closed_ || cursor_ >= size()) {
+    auto empty_patches = torch::empty({0, 3, cfg_.patch_size, cfg_.patch_size},
+                                      torch::TensorOptions()
+                                          .dtype(cfg_.output_dtype)
+                                          .device(torch::Device(torch::kCUDA, cfg_.device_id)));
+    auto empty_fields = torch::empty({0, 6},
+                                     torch::TensorOptions()
+                                         .dtype(at::kLong)
+                                         .device(torch::Device(torch::kCUDA, cfg_.device_id)));
+    auto empty_scores = torch::empty({0},
+                                     torch::TensorOptions()
+                                         .dtype(at::kFloat)
+                                         .device(torch::Device(torch::kCUDA, cfg_.device_id)));
+    return std::make_tuple(empty_patches, empty_fields, empty_scores);
+  }
+
+  const int64_t end = std::min<int64_t>(size(), cursor_ + n);
+  auto patches = patch_bank_.slice(0, cursor_, end);
+  auto fields = metadata_fields_gpu_.slice(0, cursor_, end);
+  auto scores = metadata_scores_gpu_.slice(0, cursor_, end);
+  cursor_ = end;
+  return std::make_tuple(patches, fields, scores);
 }
 
 void CodecPatchStreamNative::reset() { cursor_ = 0; }
 
 void CodecPatchStreamNative::close() {
   patch_bank_ = at::Tensor();
+  metadata_fields_gpu_ = at::Tensor();
+  metadata_scores_gpu_ = at::Tensor();
   meta_.clear();
+  metadata_cached_ = false;
   cursor_ = 0;
   closed_ = true;
 }
 
 const at::Tensor& CodecPatchStreamNative::patch_bank() const { return patch_bank_; }
 
-const std::vector<PatchMeta>& CodecPatchStreamNative::metadata() const { return meta_; }
+const std::vector<PatchMeta>& CodecPatchStreamNative::metadata() const {
+  materialize_metadata_cpu_cache();
+  return meta_;
+}
+
+const at::Tensor& CodecPatchStreamNative::metadata_fields_gpu() const {
+  return metadata_fields_gpu_;
+}
+
+const at::Tensor& CodecPatchStreamNative::metadata_scores_gpu() const {
+  return metadata_scores_gpu_;
+}
+
+std::vector<PatchMeta> CodecPatchStreamNative::metadata_slice_cpu(int64_t begin,
+                                                                  int64_t end) const {
+  if (!metadata_fields_gpu_.defined() || end <= begin) {
+    return {};
+  }
+  auto fields_cpu =
+      metadata_fields_gpu_.slice(0, begin, end).to(torch::kCPU, /*non_blocking=*/false).contiguous();
+  auto scores_cpu =
+      metadata_scores_gpu_.slice(0, begin, end).to(torch::kCPU, /*non_blocking=*/false).contiguous();
+  return build_patch_meta_from_cpu_tensors(fields_cpu, scores_cpu);
+}
+
+void CodecPatchStreamNative::materialize_metadata_cpu_cache() const {
+  if (metadata_cached_) {
+    return;
+  }
+  meta_.clear();
+  if (size() <= 0 || !metadata_fields_gpu_.defined()) {
+    metadata_cached_ = true;
+    return;
+  }
+  meta_ = metadata_slice_cpu(0, size());
+  metadata_cached_ = true;
+}
 
 const char* version() { return "0.2.0"; }
 

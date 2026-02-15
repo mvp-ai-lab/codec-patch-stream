@@ -57,6 +57,15 @@ for patch, meta in stream:
     # patch: (3, 14, 14) bf16 CUDA tensor
     # meta: seq_pos/frame_id/is_i/patch idx/score
     pass
+
+# GPU-first metadata fast path (no eager CPU metadata materialization)
+patches, meta_fields, meta_scores = stream.next_n_tensors(256)
+# meta_fields: int64 CUDA tensor (N, 6)
+# columns: [seq_pos, frame_id, is_i, patch_linear_idx, patch_h_idx, patch_w_idx]
+# meta_scores: float32 CUDA tensor (N,)
+
+# full metadata tensors for all selected patches
+all_meta_fields, all_meta_scores = stream.metadata_tensors
 ```
 
 `static_fallback` only adjusts P-frame selection under the remaining global budget after I-frame priority.
@@ -65,4 +74,12 @@ for patch, meta in stream:
 python examples/demo_patch_stream.py ./assets/demo.mp4 \
     --frames 16 --input-size 224 --patch 14 --topk 1024 --dtype bf16 \
     --out-dir patch_viz
+```
+
+## Benchmark
+
+```bash
+python examples/benchmark.py ./assets/demo.mp4 \
+    --frames 16 --input-size 224 --patch 14 --topk 1024 --dtype bf16 \
+    --prepare-repeats 5 --prepare-warmup 1
 ```

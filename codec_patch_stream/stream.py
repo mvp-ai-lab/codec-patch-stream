@@ -55,6 +55,9 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
     def next_n(self, n: int) -> Tuple[torch.Tensor, List[Dict[str, int | float | bool]]]:
         return self._native.next_n(int(n))
 
+    def next_n_tensors(self, n: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._native.next_n_tensors(int(n))
+
     def reset(self) -> None:
         self._native.reset()
 
@@ -68,3 +71,7 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
     @property
     def metadata(self) -> List[Dict[str, int | float | bool]]:
         return list(self._native.metadata)
+
+    @property
+    def metadata_tensors(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self._native.metadata_tensors

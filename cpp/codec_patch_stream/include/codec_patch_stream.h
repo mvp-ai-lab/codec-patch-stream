@@ -101,19 +101,27 @@ class CodecPatchStreamNative {
   bool has_next() const;
   std::tuple<at::Tensor, PatchMeta> next();
   std::tuple<at::Tensor, std::vector<PatchMeta>> next_n(int64_t n);
+  std::tuple<at::Tensor, at::Tensor, at::Tensor> next_n_tensors(int64_t n);
   void reset();
   void close();
 
   const at::Tensor& patch_bank() const;
   const std::vector<PatchMeta>& metadata() const;
+  const at::Tensor& metadata_fields_gpu() const;
+  const at::Tensor& metadata_scores_gpu() const;
 
  private:
   void prepare();
+  std::vector<PatchMeta> metadata_slice_cpu(int64_t begin, int64_t end) const;
+  void materialize_metadata_cpu_cache() const;
 
   std::string video_path_;
   StreamConfig cfg_;
   at::Tensor patch_bank_;
-  std::vector<PatchMeta> meta_;
+  at::Tensor metadata_fields_gpu_;
+  at::Tensor metadata_scores_gpu_;
+  mutable std::vector<PatchMeta> meta_;
+  mutable bool metadata_cached_ = false;
   int64_t cursor_ = 0;
   bool closed_ = false;
 };
