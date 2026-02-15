@@ -11,7 +11,7 @@
 ## Preview
 
 <div style="display: flex; gap: 10px;">
-    <video src="./assets/demo.mp4" style="height: 300px;"></video>
+    <img src="./assets/demo.gif" style="height: 300px;" />
     <img src="./assets/output.gif" style="height: 300px;" />
 </div>
 

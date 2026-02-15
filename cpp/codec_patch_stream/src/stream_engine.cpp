@@ -158,49 +158,36 @@ at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
   return fused;
 }
 
-at::Tensor resize_center_crop_cuda(const at::Tensor& frames_or_energy,
-                                   int64_t input_size,
-                                   bool is_energy) {
+at::Tensor resize_to_input_cuda(const at::Tensor& frames_or_energy,
+                                int64_t input_size,
+                                bool is_energy) {
   TORCH_CHECK(frames_or_energy.is_cuda(), "input must be CUDA tensor");
   TORCH_CHECK(input_size > 0, "input_size must be > 0");
 
   at::Tensor x;
-  int64_t h = 0;
-  int64_t w = 0;
 
   if (is_energy) {
     TORCH_CHECK(frames_or_energy.dim() == 3,
                 "energy tensor must have shape (T,H,W)");
-    h = frames_or_energy.size(1);
-    w = frames_or_energy.size(2);
     x = frames_or_energy.unsqueeze(1);
   } else {
     TORCH_CHECK(frames_or_energy.dim() == 4 && frames_or_energy.size(3) == 3,
                 "frame tensor must have shape (T,H,W,3)");
-    h = frames_or_energy.size(1);
-    w = frames_or_energy.size(2);
     x = frames_or_energy.permute({0, 3, 1, 2});
   }
 
-  const double scale = static_cast<double>(input_size) / static_cast<double>(std::min(h, w));
-  const int64_t nh = static_cast<int64_t>(std::llround(static_cast<double>(h) * scale));
-  const int64_t nw = static_cast<int64_t>(std::llround(static_cast<double>(w) * scale));
-
   auto resized = at::upsample_bilinear2d(
-      x, {nh, nw}, /*align_corners=*/false, c10::nullopt, c10::nullopt);
-
-  const int64_t y1 = (nh - input_size) / 2;
-  const int64_t x1 = (nw - input_size) / 2;
-  auto cropped = resized.index({torch::indexing::Slice(),
-                                torch::indexing::Slice(),
-                                torch::indexing::Slice(y1, y1 + input_size),
-                                torch::indexing::Slice(x1, x1 + input_size)});
+      x, {input_size, input_size}, /*align_corners=*/false, c10::nullopt, c10::nullopt);
 
   if (is_energy) {
-    return cropped.index(
-        {torch::indexing::Slice(), 0, torch::indexing::Slice(), torch::indexing::Slice()});
+    return resized
+        .index({torch::indexing::Slice(),
+                0,
+                torch::indexing::Slice(),
+                torch::indexing::Slice()})
+        .contiguous();
   }
-  return cropped.permute({0, 2, 3, 1}).contiguous();
+  return resized.permute({0, 2, 3, 1}).contiguous();
 }
 
 std::tuple<int64_t, int64_t, int64_t> linear_to_thw(int64_t linear_idx,
@@ -227,10 +214,10 @@ void CodecPatchStreamNative::prepare() {
 
   auto energy =
       compute_energy_maps_cuda(decoded.frames_rgb_u8, decoded.is_i_positions, cfg_.energy_pct);
-  energy = resize_center_crop_cuda(energy, cfg_.input_size, true);
+  energy = resize_to_input_cuda(energy, cfg_.input_size, true);
 
   auto resized_frames =
-      resize_center_crop_cuda(decoded.frames_rgb_u8.to(at::kFloat), cfg_.input_size, false);
+      resize_to_input_cuda(decoded.frames_rgb_u8.to(at::kFloat), cfg_.input_size, false);
 
   auto selection = compute_visible_indices_cuda(energy,
                                                 cfg_.patch_size,

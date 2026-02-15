@@ -67,9 +67,9 @@ at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
                                     const std::vector<uint8_t>& is_i_positions,
                                     double energy_pct);
 
-at::Tensor resize_center_crop_cuda(const at::Tensor& frames_or_energy,
-                                   int64_t input_size,
-                                   bool is_energy);
+at::Tensor resize_to_input_cuda(const at::Tensor& frames_or_energy,
+                                int64_t input_size,
+                                bool is_energy);
 
 SelectionResult compute_visible_indices_cuda(const at::Tensor& energy,
                                              int64_t patch_size,
