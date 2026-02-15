@@ -5,7 +5,7 @@
 - input: H.264/H.265 video path
 - output: iterable stream of selected ViT patches on the selected device
 - GPU pipeline: NVDEC decode -> GPU block-matching MV proxy + compensation residual proxy (estimated) -> fused energy -> static fallback (optional) -> global Top-K (I-frame first) -> patch extract
-- CPU pipeline: FFmpeg software decode -> CPU block-matching MV proxy + compensation residual proxy -> fused energy -> static fallback (optional) -> global Top-K (I-frame first) -> patch extract
+- CPU pipeline: FFmpeg software decode -> CPU real MV or block-matching MV proxy + compensation residual proxy -> fused energy -> static fallback (optional) -> global Top-K (I-frame first) -> patch extract
 
 > NOTE: As NVDEC doesn't expose motion vectors or residuals, we use block-matching on the decoded frames as a estimated proxy, which is much faster than optical flow and can be done on the GPU.
 
@@ -85,7 +85,34 @@ python examples/demo_patch_stream.py ./assets/demo.mp4 \
 ## Benchmark
 
 ```bash
-python examples/benchmark.py ./assets/demo.mp4 \
-    --frames 16 --input-size 224 --patch 14 --topk 1024 --dtype bf16 \
-    --backend auto --prepare-repeats 5 --prepare-warmup 1
+# Benchmark command for a 4K, 1 min video, selecting 16K patches:
+python examples/benchmark.py 4K.mp4 \
+    --backend gpu --frames 128 --input-size 1120 --patch 14 --topk 16384 \
+    --dtype bf16 --prepare-warmup 1 --prepare-repeats 2
+
+====================================================================================
+Benchmark Results (CPU backend)
+====================================================================================
++------------------+----------+
+| Metric           | Value    |
++------------------+----------+
+| selected_patches | 16,384   |
+| mean_ms          | 69165.83 |
+| std_ms           | 38.94    |
+| min_ms           | 69138.30 |
+| max_ms           | 69193.37 |
++------------------+----------+
+
+====================================================================================
+Benchmark Results (GPU backend)
+====================================================================================
++------------------+----------+
+| Metric           | Value    |
++------------------+----------+
+| selected_patches | 16,384   |
+| mean_ms          | 19694.74 |
+| std_ms           | 5.26     |
+| min_ms           | 19691.02 |
+| max_ms           | 19698.46 |
++------------------+----------+
 ```

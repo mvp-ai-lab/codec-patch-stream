@@ -4,6 +4,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
+#include <libavutil/frame.h>
+#include <libavutil/motion_vector.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
@@ -122,6 +124,7 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
 
     check_ff(avcodec_parameters_to_context(dec_ctx, video_stream->codecpar),
              "avcodec_parameters_to_context");
+    dec_ctx->flags2 |= AV_CODEC_FLAG2_EXPORT_MVS;
     check_ff(avcodec_open2(dec_ctx, codec, nullptr), "avcodec_open2");
 
     const int64_t total_frames = estimate_total_frames(fmt_ctx, video_stream, dec_ctx);
@@ -142,6 +145,9 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
     at::Tensor uniq_frames =
         torch::empty({static_cast<int64_t>(uniq_frame_ids.size()), height, width, 3},
                      frame_opts);
+    auto mv_opts = torch::TensorOptions().dtype(at::kFloat).device(torch::kCPU);
+    at::Tensor uniq_mv_magnitude =
+        torch::zeros({static_cast<int64_t>(uniq_frame_ids.size()), height, width}, mv_opts);
 
     std::vector<uint8_t> captured(uniq_frame_ids.size(), 0);
     std::vector<uint8_t> key_flags(uniq_frame_ids.size(), 0);
@@ -155,6 +161,7 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
     int64_t decoded_frame_idx = 0;
     size_t next_target = 0;
     size_t captured_count = 0;
+    bool any_codec_mv = false;
     bool done = uniq_frame_ids.empty();
 
     auto process_frame = [&](AVFrame* f) {
@@ -190,6 +197,48 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
             sws_scale(sws_ctx, f->data, f->linesize, 0, f->height, dst_data, dst_linesize);
         if (scaled_h <= 0) {
           throw std::runtime_error("sws_scale failed");
+        }
+
+        // Exported codec motion vectors (if present).
+        float* mv_dst = uniq_mv_magnitude.data_ptr<float>() + pos * height * width;
+        std::fill_n(mv_dst, static_cast<size_t>(height * width), 0.0f);
+        AVFrameSideData* mv_side = av_frame_get_side_data(f, AV_FRAME_DATA_MOTION_VECTORS);
+        if (mv_side && mv_side->data &&
+            mv_side->size >= static_cast<int>(sizeof(AVMotionVector))) {
+          bool frame_has_mv = false;
+          const int mv_count = mv_side->size / static_cast<int>(sizeof(AVMotionVector));
+          auto* vectors = reinterpret_cast<const AVMotionVector*>(mv_side->data);
+          for (int i = 0; i < mv_count; ++i) {
+            const AVMotionVector& mv = vectors[i];
+            if (mv.motion_scale == 0) {
+              continue;
+            }
+
+            const float mx = static_cast<float>(mv.motion_x) /
+                             static_cast<float>(mv.motion_scale);
+            const float my = static_cast<float>(mv.motion_y) /
+                             static_cast<float>(mv.motion_scale);
+            const float mag = std::sqrt(mx * mx + my * my);
+
+            const int x0 = std::max<int>(0, mv.dst_x);
+            const int y0 = std::max<int>(0, mv.dst_y);
+            const int x1 = std::min<int>(static_cast<int>(width),
+                                         static_cast<int>(mv.dst_x) + static_cast<int>(mv.w));
+            const int y1 = std::min<int>(static_cast<int>(height),
+                                         static_cast<int>(mv.dst_y) + static_cast<int>(mv.h));
+            if (x1 <= x0 || y1 <= y0) {
+              continue;
+            }
+            frame_has_mv = true;
+
+            for (int y = y0; y < y1; ++y) {
+              float* row = mv_dst + static_cast<int64_t>(y) * width;
+              for (int x = x0; x < x1; ++x) {
+                row[x] = std::max(row[x], mag);
+              }
+            }
+          }
+          any_codec_mv = any_codec_mv || frame_has_mv;
         }
 
         key_flags[next_target] = f->key_frame ? static_cast<uint8_t>(1)
@@ -283,14 +332,20 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
     }
 
     at::Tensor sampled_frames;
+    at::Tensor sampled_mv_magnitude;
     if (need_gather) {
       auto gather = torch::from_blob(gather_pos.data(),
                                      {static_cast<int64_t>(gather_pos.size())},
                                      torch::TensorOptions().dtype(at::kLong))
                         .clone();
       sampled_frames = uniq_frames.index_select(0, gather);
+      sampled_mv_magnitude = uniq_mv_magnitude.index_select(0, gather);
     } else {
       sampled_frames = uniq_frames;
+      sampled_mv_magnitude = uniq_mv_magnitude;
+    }
+    if (!any_codec_mv) {
+      sampled_mv_magnitude = at::Tensor();
     }
 
     if (sws_ctx) {
@@ -311,6 +366,7 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
 
     DecodeResult out;
     out.frames_rgb_u8 = sampled_frames;
+    out.mv_magnitude_maps = sampled_mv_magnitude;
     out.sampled_frame_ids = std::move(frame_ids);
     out.is_i_positions = std::move(is_i_positions);
     out.width = width;

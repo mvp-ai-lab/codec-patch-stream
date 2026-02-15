@@ -36,6 +36,7 @@ struct PatchMeta {
 
 struct DecodeResult {
   at::Tensor frames_rgb_u8;
+  at::Tensor mv_magnitude_maps;
   std::vector<int64_t> sampled_frame_ids;
   std::vector<uint8_t> is_i_positions;
   int64_t width = 0;
@@ -53,6 +54,7 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
                                               int64_t sequence_length);
 
 at::Tensor compute_energy_maps_cpu(const at::Tensor& frames_rgb_u8,
+                                   const at::Tensor& mv_magnitude_maps,
                                    const std::vector<uint8_t>& is_i_positions,
                                    double energy_pct);
 

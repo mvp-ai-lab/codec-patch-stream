@@ -79,6 +79,7 @@ std::vector<PatchMeta> build_patch_meta_from_cpu_tensors(const at::Tensor& field
 }  // namespace
 
 at::Tensor compute_energy_maps_cpu(const at::Tensor& frames_rgb_u8,
+                                   const at::Tensor& mv_magnitude_maps,
                                    const std::vector<uint8_t>& is_i_positions,
                                    double energy_pct) {
   using torch::indexing::Slice;
@@ -94,6 +95,14 @@ at::Tensor compute_energy_maps_cpu(const at::Tensor& frames_rgb_u8,
   const int64_t w = frames_rgb_u8.size(2);
   TORCH_CHECK(static_cast<int64_t>(is_i_positions.size()) == t,
               "is_i_positions size mismatch");
+  TORCH_CHECK(!mv_magnitude_maps.defined() ||
+                  (!mv_magnitude_maps.is_cuda() &&
+                   mv_magnitude_maps.scalar_type() == at::kFloat &&
+                   mv_magnitude_maps.dim() == 3 &&
+                   mv_magnitude_maps.size(0) == t &&
+                   mv_magnitude_maps.size(1) == h &&
+                   mv_magnitude_maps.size(2) == w),
+              "mv_magnitude_maps must be float32 CPU tensor with shape (T,H,W)");
 
   auto rgb = frames_rgb_u8.to(at::kFloat);
   auto luma = 0.299f * rgb.index({Slice(), Slice(), Slice(), 0}) +
@@ -117,8 +126,20 @@ at::Tensor compute_energy_maps_cpu(const at::Tensor& frames_rgb_u8,
   const int64_t max_radius = std::max<int64_t>(1, std::min<int64_t>(hs, ws) / 2);
   const int64_t search_radius = std::max<int64_t>(1, std::min<int64_t>(4, max_radius));
   auto proxies = compute_motion_residual_proxy_small_cpu(luma_small, search_radius);
-  auto mv_proxy_small = std::get<0>(proxies);
   auto residual_proxy_small = std::get<1>(proxies);
+
+  at::Tensor mv_proxy_small;
+  if (mv_magnitude_maps.defined()) {
+    mv_proxy_small = at::upsample_bilinear2d(mv_magnitude_maps.unsqueeze(1),
+                                             {hs, ws},
+                                             false,
+                                             c10::nullopt,
+                                             c10::nullopt)
+                         .index({Slice(), 0, Slice(), Slice()})
+                         .contiguous();
+  } else {
+    mv_proxy_small = std::get<0>(proxies);
+  }
 
   auto mv_norm_small = normalize_per_frame_percentile_cpu(mv_proxy_small, energy_pct);
   auto residual_norm_small =
@@ -190,8 +211,10 @@ CodecPatchStreamNative::CodecPatchStreamNative(const std::string& video_path,
 void CodecPatchStreamNative::prepare() {
   auto decoded = decode_sampled_frames_ffmpeg_cpu(video_path_, cfg_.sequence_length);
 
-  auto energy =
-      compute_energy_maps_cpu(decoded.frames_rgb_u8, decoded.is_i_positions, cfg_.energy_pct);
+  auto energy = compute_energy_maps_cpu(decoded.frames_rgb_u8,
+                                        decoded.mv_magnitude_maps,
+                                        decoded.is_i_positions,
+                                        cfg_.energy_pct);
   energy = resize_to_input_cpu(energy, cfg_.input_size, true);
 
   auto resized_frames =
