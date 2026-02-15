@@ -67,6 +67,10 @@ at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
                                     const std::vector<uint8_t>& is_i_positions,
                                     double energy_pct);
 
+std::tuple<at::Tensor, at::Tensor> compute_motion_residual_proxy_small_cuda(
+    const at::Tensor& luma_small,
+    int64_t search_radius);
+
 at::Tensor resize_to_input_cuda(const at::Tensor& frames_or_energy,
                                 int64_t input_size,
                                 bool is_energy);

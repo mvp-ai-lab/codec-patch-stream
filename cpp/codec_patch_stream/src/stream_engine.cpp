@@ -1,4 +1,3 @@
-#include <ATen/ops/roll.h>
 #include <ATen/ops/upsample_bilinear2d.h>
 #include <torch/extension.h>
 
@@ -43,59 +42,6 @@ at::Tensor normalize_per_frame_percentile_cuda(const at::Tensor& maps, double pc
   auto kth_vals = std::get<0>(flat.kthvalue(kth, 1, false));
   auto denom = kth_vals.clamp_min(1e-6f).view({t, 1, 1});
   return (maps / denom).clamp(0.0f, 1.0f).contiguous();
-}
-
-std::tuple<at::Tensor, at::Tensor> compute_motion_residual_proxy_small_cuda(
-    const at::Tensor& luma_small, int64_t search_radius) {
-  using torch::indexing::Slice;
-
-  TORCH_CHECK(luma_small.is_cuda(), "luma_small must be CUDA tensor");
-  TORCH_CHECK(luma_small.scalar_type() == at::kFloat, "luma_small must be float32");
-  TORCH_CHECK(luma_small.dim() == 3, "luma_small must have shape (T,H,W)");
-
-  const int64_t t = luma_small.size(0);
-  const int64_t hs = luma_small.size(1);
-  const int64_t ws = luma_small.size(2);
-
-  auto mv_proxy = torch::zeros_like(luma_small);
-  auto residual_proxy = torch::zeros_like(luma_small);
-  if (t <= 1) {
-    return std::make_tuple(mv_proxy, residual_proxy);
-  }
-
-  auto cur = luma_small.index({Slice(1, t), Slice(), Slice()});
-  auto prev = luma_small.index({Slice(0, t - 1), Slice(), Slice()});
-
-  auto best_err = torch::full_like(cur, 1e9f);
-  auto best_mag = torch::zeros_like(cur);
-
-  for (int64_t dy = -search_radius; dy <= search_radius; ++dy) {
-    for (int64_t dx = -search_radius; dx <= search_radius; ++dx) {
-      auto shifted = torch::roll(prev, {dy, dx}, {1, 2});
-      auto err = (cur - shifted).abs();
-
-      if (dy > 0) {
-        err.index_put_({Slice(), Slice(0, dy), Slice()}, 1e9f);
-      } else if (dy < 0) {
-        err.index_put_({Slice(), Slice(hs + dy, hs), Slice()}, 1e9f);
-      }
-      if (dx > 0) {
-        err.index_put_({Slice(), Slice(), Slice(0, dx)}, 1e9f);
-      } else if (dx < 0) {
-        err.index_put_({Slice(), Slice(), Slice(ws + dx, ws)}, 1e9f);
-      }
-
-      auto better = err < best_err;
-      best_err = torch::where(better, err, best_err);
-
-      const float mag = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-      best_mag = torch::where(better, torch::full_like(best_mag, mag), best_mag);
-    }
-  }
-
-  mv_proxy.index_put_({Slice(1, t), Slice(), Slice()}, best_mag);
-  residual_proxy.index_put_({Slice(1, t), Slice(), Slice()}, best_err);
-  return std::make_tuple(mv_proxy.contiguous(), residual_proxy.contiguous());
 }
 
 }  // namespace

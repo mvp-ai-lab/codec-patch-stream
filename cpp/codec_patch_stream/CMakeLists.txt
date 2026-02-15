@@ -8,6 +8,7 @@ set(SOURCES
     ../../python/codec_patch_stream_pybind.cpp
     src/demux_decode_nvdec.cpp
     src/nv12_to_rgb_kernels.cu
+    src/motion_residual_proxy_kernels.cu
     src/patch_select_kernels.cu
     src/patch_extract_kernels.cu
     src/stream_engine.cpp

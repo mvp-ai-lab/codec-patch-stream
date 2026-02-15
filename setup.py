@@ -25,6 +25,7 @@ def _get_extensions():
         "python/codec_patch_stream_pybind.cpp",
         "cpp/codec_patch_stream/src/demux_decode_nvdec.cpp",
         "cpp/codec_patch_stream/src/nv12_to_rgb_kernels.cu",
+        "cpp/codec_patch_stream/src/motion_residual_proxy_kernels.cu",
         "cpp/codec_patch_stream/src/patch_select_kernels.cu",
         "cpp/codec_patch_stream/src/patch_extract_kernels.cu",
         "cpp/codec_patch_stream/src/stream_engine.cpp",
