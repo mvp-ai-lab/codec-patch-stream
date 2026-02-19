@@ -91,6 +91,37 @@ int64_t estimate_total_frames(AVFormatContext* fmt_ctx,
       "Unable to infer total frame count. Please remux video with frame count metadata.");
 }
 
+double infer_fps(AVStream* video_stream, AVCodecContext* dec_ctx) {
+  AVRational fr = video_stream->avg_frame_rate;
+  if (fr.num <= 0 || fr.den <= 0) {
+    fr = dec_ctx->framerate;
+  }
+  const double fps = (fr.num > 0 && fr.den > 0) ? av_q2d(fr) : 0.0;
+  return fps > 0.0 ? fps : 0.0;
+}
+
+double infer_duration_sec(AVFormatContext* fmt_ctx,
+                          AVStream* video_stream,
+                          double fps,
+                          int64_t total_frames) {
+  if (video_stream->duration > 0) {
+    const double sec = video_stream->duration * av_q2d(video_stream->time_base);
+    if (sec > 0.0) {
+      return sec;
+    }
+  }
+  if (fmt_ctx->duration > 0) {
+    const double sec = static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE;
+    if (sec > 0.0) {
+      return sec;
+    }
+  }
+  if (fps > 0.0 && total_frames > 0) {
+    return static_cast<double>(total_frames) / fps;
+  }
+  return 0.0;
+}
+
 }  // namespace
 
 DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
@@ -128,6 +159,8 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
     check_ff(avcodec_open2(dec_ctx, codec, nullptr), "avcodec_open2");
 
     const int64_t total_frames = estimate_total_frames(fmt_ctx, video_stream, dec_ctx);
+    const double fps = infer_fps(video_stream, dec_ctx);
+    const double duration_sec = infer_duration_sec(fmt_ctx, video_stream, fps, total_frames);
     std::vector<int64_t> frame_ids = sample_frame_ids(total_frames, sequence_length);
 
     std::vector<int64_t> uniq_frame_ids = frame_ids;
@@ -369,6 +402,8 @@ DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
     out.mv_magnitude_maps = sampled_mv_magnitude;
     out.sampled_frame_ids = std::move(frame_ids);
     out.is_i_positions = std::move(is_i_positions);
+    out.fps = fps;
+    out.duration_sec = duration_sec;
     out.width = width;
     out.height = height;
     return out;

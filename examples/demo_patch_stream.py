@@ -5,9 +5,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch
-from torchvision.utils import save_image
-
 from codec_patch_stream import CodecPatchStream
+from torchvision.utils import save_image
 
 
 def main() -> None:
@@ -30,6 +29,10 @@ def main() -> None:
         k_keep=args.topk,
         output_dtype=args.dtype,
         backend=args.backend,
+        selection_unit="block2x2",
+        static_fallback=False,
+        energy_pct=95.0,
+        prefetch_depth=3,
     )
 
     print(f"Total selected patches: {len(s)}")

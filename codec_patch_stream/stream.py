@@ -17,6 +17,7 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
         input_size: int = 224,
         patch_size: int = 14,
         k_keep: int = 2048,
+        selection_unit: str = "patch",
         static_fallback: bool = False,
         static_abs_thresh: float = 2.0,
         static_rel_thresh: float = 0.15,
@@ -34,6 +35,7 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
             input_size=int(input_size),
             patch_size=int(patch_size),
             k_keep=int(k_keep),
+            selection_unit=str(selection_unit),
             static_fallback=bool(static_fallback),
             static_abs_thresh=float(static_abs_thresh),
             static_rel_thresh=float(static_rel_thresh),
@@ -76,3 +78,15 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
     @property
     def metadata_tensors(self) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._native.metadata_tensors
+
+    @property
+    def sampled_frame_ids(self) -> List[int]:
+        return list(self._native.sampled_frame_ids)
+
+    @property
+    def fps(self) -> float:
+        return float(self._native.fps)
+
+    @property
+    def duration_sec(self) -> float:
+        return float(self._native.duration_sec)

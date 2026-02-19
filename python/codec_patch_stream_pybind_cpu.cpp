@@ -32,6 +32,20 @@ at::ScalarType parse_dtype(const std::string& dtype) {
   throw std::invalid_argument("Unsupported output_dtype: " + dtype);
 }
 
+int64_t parse_selection_unit(const std::string& unit) {
+  std::string key = unit;
+  std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (key == "patch" || key == "patches") {
+    return 0;
+  }
+  if (key == "block2x2" || key == "block_2x2" || key == "block") {
+    return 1;
+  }
+  throw std::invalid_argument("Unsupported selection_unit: " + unit);
+}
+
 py::dict meta_to_dict(const codec_patch_stream::PatchMeta& m) {
   py::dict d;
   d["seq_pos"] = m.seq_pos;
@@ -60,6 +74,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        int64_t input_size,
                        int64_t patch_size,
                        int64_t k_keep,
+                       const std::string& selection_unit,
                        bool static_fallback,
                        double static_abs_thresh,
                        double static_rel_thresh,
@@ -73,6 +88,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              cfg.input_size = input_size;
              cfg.patch_size = patch_size;
              cfg.k_keep = k_keep;
+             cfg.selection_unit = parse_selection_unit(selection_unit);
              cfg.static_fallback = static_fallback;
              cfg.static_abs_thresh = static_abs_thresh;
              cfg.static_rel_thresh = static_rel_thresh;
@@ -89,6 +105,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("input_size") = 224,
            py::arg("patch_size") = 14,
            py::arg("k_keep") = 2048,
+           py::arg("selection_unit") = "patch",
            py::arg("static_fallback") = false,
            py::arg("static_abs_thresh") = 2.0,
            py::arg("static_rel_thresh") = 0.15,
@@ -113,6 +130,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                              [](codec_patch_stream::CodecPatchStreamNative& self) {
                                return py::make_tuple(self.metadata_fields_gpu(),
                                                      self.metadata_scores_gpu());
+                             })
+      .def_property_readonly("sampled_frame_ids",
+                             [](codec_patch_stream::CodecPatchStreamNative& self) {
+                               return self.sampled_frame_ids();
+                             })
+      .def_property_readonly("fps",
+                             [](codec_patch_stream::CodecPatchStreamNative& self) {
+                               return self.fps();
+                             })
+      .def_property_readonly("duration_sec",
+                             [](codec_patch_stream::CodecPatchStreamNative& self) {
+                               return self.duration_sec();
                              })
       .def("next_n", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
         auto out = self.next_n(n);

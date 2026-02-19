@@ -14,6 +14,8 @@ struct StreamConfig {
   int64_t input_size = 224;
   int64_t patch_size = 14;
   int64_t k_keep = 2048;
+  // 0: patch-level top-k, 1: 2x2 block-level top-k (expanded to 4 patches per block)
+  int64_t selection_unit = 0;
   bool static_fallback = false;
   double static_abs_thresh = 2.0;
   double static_rel_thresh = 0.15;
@@ -39,6 +41,8 @@ struct DecodeResult {
   at::Tensor mv_magnitude_maps;
   std::vector<int64_t> sampled_frame_ids;
   std::vector<uint8_t> is_i_positions;
+  double fps = 0.0;
+  double duration_sec = 0.0;
   int64_t width = 0;
   int64_t height = 0;
 };
@@ -69,6 +73,7 @@ std::tuple<at::Tensor, at::Tensor> compute_motion_residual_proxy_small_cpu(
 SelectionResult compute_visible_indices_cpu(const at::Tensor& energy,
                                             int64_t patch_size,
                                             int64_t k_keep,
+                                            int64_t selection_unit,
                                             bool static_fallback,
                                             double static_abs_thresh,
                                             double static_rel_thresh,
@@ -100,6 +105,9 @@ class CodecPatchStreamNative {
   const std::vector<PatchMeta>& metadata() const;
   const at::Tensor& metadata_fields_gpu() const;
   const at::Tensor& metadata_scores_gpu() const;
+  const std::vector<int64_t>& sampled_frame_ids() const;
+  double fps() const;
+  double duration_sec() const;
 
  private:
   void prepare();
@@ -111,6 +119,9 @@ class CodecPatchStreamNative {
   at::Tensor patch_bank_;
   at::Tensor metadata_fields_cpu_;
   at::Tensor metadata_scores_cpu_;
+  std::vector<int64_t> sampled_frame_ids_;
+  double fps_ = 0.0;
+  double duration_sec_ = 0.0;
   mutable std::vector<PatchMeta> meta_;
   mutable bool metadata_cached_ = false;
   int64_t cursor_ = 0;

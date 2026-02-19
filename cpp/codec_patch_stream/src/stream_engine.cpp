@@ -200,6 +200,7 @@ void CodecPatchStreamNative::prepare() {
   auto selection = compute_visible_indices_cuda(energy,
                                                 cfg_.patch_size,
                                                 cfg_.k_keep,
+                                                cfg_.selection_unit,
                                                 cfg_.static_fallback,
                                                 cfg_.static_abs_thresh,
                                                 cfg_.static_rel_thresh,
@@ -251,6 +252,10 @@ void CodecPatchStreamNative::prepare() {
       torch::stack({seq_pos, frame_ids, is_i, visible, ph_idx, pw_idx}, 1).contiguous();
   metadata_scores_gpu_ =
       selection.scores_flat.index_select(0, visible).toType(at::kFloat).contiguous();
+
+  sampled_frame_ids_ = decoded.sampled_frame_ids;
+  fps_ = decoded.fps;
+  duration_sec_ = decoded.duration_sec;
 
   cursor_ = 0;
   closed_ = false;
@@ -331,6 +336,9 @@ void CodecPatchStreamNative::close() {
   patch_bank_ = at::Tensor();
   metadata_fields_gpu_ = at::Tensor();
   metadata_scores_gpu_ = at::Tensor();
+  sampled_frame_ids_.clear();
+  fps_ = 0.0;
+  duration_sec_ = 0.0;
   meta_.clear();
   metadata_cached_ = false;
   cursor_ = 0;
@@ -351,6 +359,14 @@ const at::Tensor& CodecPatchStreamNative::metadata_fields_gpu() const {
 const at::Tensor& CodecPatchStreamNative::metadata_scores_gpu() const {
   return metadata_scores_gpu_;
 }
+
+const std::vector<int64_t>& CodecPatchStreamNative::sampled_frame_ids() const {
+  return sampled_frame_ids_;
+}
+
+double CodecPatchStreamNative::fps() const { return fps_; }
+
+double CodecPatchStreamNative::duration_sec() const { return duration_sec_; }
 
 std::vector<PatchMeta> CodecPatchStreamNative::metadata_slice_cpu(int64_t begin,
                                                                   int64_t end) const {

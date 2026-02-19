@@ -8,6 +8,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixfmt.h>
 }
 
@@ -16,8 +17,10 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "codec_patch_stream.h"
@@ -36,6 +39,70 @@ void check_ff(int ret, const char* where) {
   if (ret < 0) {
     throw std::runtime_error(std::string(where) + " failed: " + ff_err_str(ret));
   }
+}
+
+void create_hw_device_ctx_cuda(AVBufferRef** hw_device_ctx, int64_t device_id) {
+  char device_name[16];
+  std::snprintf(device_name, sizeof(device_name), "%lld",
+                static_cast<long long>(device_id));
+
+  // Prefer CUDA primary context so FFmpeg shares the context with PyTorch.
+  int ret = av_hwdevice_ctx_create(hw_device_ctx,
+                                   AV_HWDEVICE_TYPE_CUDA,
+                                   device_name,
+                                   nullptr,
+                                   AV_CUDA_USE_PRIMARY_CONTEXT);
+  if (ret >= 0) {
+    return;
+  }
+
+  // Fallback: let FFmpeg pick default visible CUDA device with primary context.
+  ret = av_hwdevice_ctx_create(hw_device_ctx,
+                               AV_HWDEVICE_TYPE_CUDA,
+                               nullptr,
+                               nullptr,
+                               AV_CUDA_USE_PRIMARY_CONTEXT);
+  if (ret >= 0) {
+    return;
+  }
+
+  // Last fallback: legacy behavior without primary-context flag.
+  ret = av_hwdevice_ctx_create(hw_device_ctx,
+                               AV_HWDEVICE_TYPE_CUDA,
+                               device_name,
+                               nullptr,
+                               0);
+  check_ff(ret, "av_hwdevice_ctx_create(cuda)");
+}
+
+std::mutex& hw_ctx_cache_mutex() {
+  static std::mutex m;
+  return m;
+}
+
+std::unordered_map<int64_t, AVBufferRef*>& hw_ctx_cache() {
+  static std::unordered_map<int64_t, AVBufferRef*> cache;
+  return cache;
+}
+
+AVBufferRef* get_or_create_cached_hw_device_ctx(int64_t device_id) {
+  {
+    std::lock_guard<std::mutex> lock(hw_ctx_cache_mutex());
+    auto it = hw_ctx_cache().find(device_id);
+    if (it != hw_ctx_cache().end() && it->second) {
+      return av_buffer_ref(it->second);
+    }
+  }
+
+  AVBufferRef* created = nullptr;
+  create_hw_device_ctx_cuda(&created, device_id);
+
+  std::lock_guard<std::mutex> lock(hw_ctx_cache_mutex());
+  auto it = hw_ctx_cache().find(device_id);
+  if (it == hw_ctx_cache().end() || !it->second) {
+    hw_ctx_cache()[device_id] = av_buffer_ref(created);
+  }
+  return created;
 }
 
 enum AVPixelFormat get_hw_format(AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) {
@@ -101,6 +168,37 @@ int64_t estimate_total_frames(AVFormatContext* fmt_ctx,
       "Unable to infer total frame count. Please remux video with frame count metadata.");
 }
 
+double infer_fps(AVStream* video_stream, AVCodecContext* dec_ctx) {
+  AVRational fr = video_stream->avg_frame_rate;
+  if (fr.num <= 0 || fr.den <= 0) {
+    fr = dec_ctx->framerate;
+  }
+  const double fps = (fr.num > 0 && fr.den > 0) ? av_q2d(fr) : 0.0;
+  return fps > 0.0 ? fps : 0.0;
+}
+
+double infer_duration_sec(AVFormatContext* fmt_ctx,
+                          AVStream* video_stream,
+                          double fps,
+                          int64_t total_frames) {
+  if (video_stream->duration > 0) {
+    const double sec = video_stream->duration * av_q2d(video_stream->time_base);
+    if (sec > 0.0) {
+      return sec;
+    }
+  }
+  if (fmt_ctx->duration > 0) {
+    const double sec = static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE;
+    if (sec > 0.0) {
+      return sec;
+    }
+  }
+  if (fps > 0.0 && total_frames > 0) {
+    return static_cast<double>(total_frames) / fps;
+  }
+  return 0.0;
+}
+
 }  // namespace
 
 DecodeResult decode_sampled_frames_nvdec(const std::string& video_path,
@@ -139,15 +237,10 @@ DecodeResult decode_sampled_frames_nvdec(const std::string& video_path,
              "avcodec_parameters_to_context");
     dec_ctx->get_format = get_hw_format;
 
-    char device_name[16];
-    std::snprintf(device_name, sizeof(device_name), "%lld",
-                  static_cast<long long>(device_id));
-    check_ff(av_hwdevice_ctx_create(&hw_device_ctx,
-                                    AV_HWDEVICE_TYPE_CUDA,
-                                    device_name,
-                                    nullptr,
-                                    0),
-             "av_hwdevice_ctx_create(cuda)");
+    hw_device_ctx = get_or_create_cached_hw_device_ctx(device_id);
+    if (!hw_device_ctx) {
+      throw std::runtime_error("failed to get cached CUDA hw device context");
+    }
     dec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
     if (!dec_ctx->hw_device_ctx) {
       throw std::runtime_error("av_buffer_ref(hw_device_ctx) failed");
@@ -156,6 +249,8 @@ DecodeResult decode_sampled_frames_nvdec(const std::string& video_path,
     check_ff(avcodec_open2(dec_ctx, codec, nullptr), "avcodec_open2");
 
     const int64_t total_frames = estimate_total_frames(fmt_ctx, video_stream, dec_ctx);
+    const double fps = infer_fps(video_stream, dec_ctx);
+    const double duration_sec = infer_duration_sec(fmt_ctx, video_stream, fps, total_frames);
     std::vector<int64_t> frame_ids = sample_frame_ids(total_frames, sequence_length);
 
     std::vector<int64_t> uniq_frame_ids = frame_ids;
@@ -348,6 +443,8 @@ DecodeResult decode_sampled_frames_nvdec(const std::string& video_path,
     out.frames_rgb_u8 = sampled_frames;
     out.sampled_frame_ids = std::move(frame_ids);
     out.is_i_positions = std::move(is_i_positions);
+    out.fps = fps;
+    out.duration_sec = duration_sec;
     out.width = width;
     out.height = height;
     return out;
