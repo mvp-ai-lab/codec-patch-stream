@@ -81,6 +81,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(py::init([](const std::string& video_path,
                        int64_t sequence_length,
                        int64_t input_size,
+                       int64_t min_pixels,
+                       int64_t max_pixels,
                        int64_t patch_size,
                        int64_t k_keep,
                        bool static_fallback,
@@ -94,6 +96,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              codec_patch_stream::StreamConfig cfg;
              cfg.sequence_length = sequence_length;
              cfg.input_size = input_size;
+             cfg.min_pixels = min_pixels;
+             cfg.max_pixels = max_pixels;
              cfg.patch_size = patch_size;
              cfg.k_keep = k_keep;
              cfg.static_fallback = static_fallback;
@@ -110,6 +114,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("video_path"),
            py::arg("sequence_length") = 16,
            py::arg("input_size") = 224,
+           py::arg("min_pixels") = -1,
+           py::arg("max_pixels") = -1,
            py::arg("patch_size") = 14,
            py::arg("k_keep") = 2048,
            py::arg("static_fallback") = false,

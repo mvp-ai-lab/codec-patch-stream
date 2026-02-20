@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -76,6 +77,46 @@ std::vector<PatchMeta> build_patch_meta_from_cpu_tensors(const at::Tensor& field
   return out;
 }
 
+int64_t squared_pixels_from_input_size(int64_t input_size) {
+  TORCH_CHECK(input_size > 0, "input_size must be > 0");
+  if (input_size > std::numeric_limits<int64_t>::max() / input_size) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return input_size * input_size;
+}
+
+std::tuple<int64_t, int64_t> smart_resize_shape(int64_t height,
+                                                int64_t width,
+                                                int64_t patch_size,
+                                                int64_t min_pixels,
+                                                int64_t max_pixels,
+                                                int64_t align_patch_size) {
+  TORCH_CHECK(height > 0 && width > 0, "invalid shape: h=", height, ", w=", width);
+  TORCH_CHECK(patch_size > 0, "patch_size must be > 0");
+
+  const int64_t align_size = align_patch_size > 0 ? align_patch_size : patch_size;
+  TORCH_CHECK(align_size > 0, "align_size must be > 0");
+
+  const double pixels = static_cast<double>(height) * static_cast<double>(width);
+  double scale = 1.0;
+  if (min_pixels > 0 && pixels < static_cast<double>(min_pixels)) {
+    scale = std::sqrt(static_cast<double>(min_pixels) / pixels);
+  }
+  if (max_pixels > 0 && pixels > static_cast<double>(max_pixels)) {
+    scale = std::sqrt(static_cast<double>(max_pixels) / pixels);
+  }
+
+  auto aligned = [align_size](double x) -> int64_t {
+    const int64_t rounded = static_cast<int64_t>(
+        std::llround(x / static_cast<double>(align_size)));
+    return std::max<int64_t>(align_size, rounded * align_size);
+  };
+
+  const int64_t resized_h = aligned(static_cast<double>(height) * scale);
+  const int64_t resized_w = aligned(static_cast<double>(width) * scale);
+  return std::make_tuple(resized_h, resized_w);
+}
+
 }  // namespace
 
 at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
@@ -137,25 +178,36 @@ at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
 }
 
 at::Tensor resize_to_input_cuda(const at::Tensor& frames_or_energy,
-                                int64_t input_size,
+                                int64_t target_h,
+                                int64_t target_w,
                                 bool is_energy) {
   TORCH_CHECK(frames_or_energy.is_cuda(), "input must be CUDA tensor");
-  TORCH_CHECK(input_size > 0, "input_size must be > 0");
+  TORCH_CHECK(target_h > 0 && target_w > 0, "target_h/target_w must be > 0");
 
   at::Tensor x;
+  int64_t input_h = 0;
+  int64_t input_w = 0;
 
   if (is_energy) {
     TORCH_CHECK(frames_or_energy.dim() == 3,
                 "energy tensor must have shape (T,H,W)");
+    input_h = frames_or_energy.size(1);
+    input_w = frames_or_energy.size(2);
     x = frames_or_energy.unsqueeze(1);
   } else {
     TORCH_CHECK(frames_or_energy.dim() == 4 && frames_or_energy.size(3) == 3,
                 "frame tensor must have shape (T,H,W,3)");
+    input_h = frames_or_energy.size(1);
+    input_w = frames_or_energy.size(2);
     x = frames_or_energy.permute({0, 3, 1, 2});
   }
 
+  if (input_h == target_h && input_w == target_w) {
+    return frames_or_energy.contiguous();
+  }
+
   auto resized = at::upsample_bilinear2d(
-      x, {input_size, input_size}, /*align_corners=*/false, c10::nullopt, c10::nullopt);
+      x, {target_h, target_w}, /*align_corners=*/false, c10::nullopt, c10::nullopt);
 
   if (is_energy) {
     return resized
@@ -190,12 +242,23 @@ CodecPatchStreamNative::CodecPatchStreamNative(const std::string& video_path,
 void CodecPatchStreamNative::prepare() {
   auto decoded = decode_sampled_frames_nvdec(video_path_, cfg_.sequence_length, cfg_.device_id);
 
+  const int64_t default_pixels = squared_pixels_from_input_size(cfg_.input_size);
+  const int64_t min_pixels = cfg_.min_pixels > 0 ? cfg_.min_pixels : default_pixels;
+  const int64_t max_pixels = cfg_.max_pixels > 0 ? cfg_.max_pixels : default_pixels;
+  const auto [target_h, target_w] =
+      smart_resize_shape(decoded.frames_rgb_u8.size(1),
+                         decoded.frames_rgb_u8.size(2),
+                         cfg_.patch_size,
+                         min_pixels,
+                         max_pixels,
+                         cfg_.patch_size * 2);
+
   auto energy =
       compute_energy_maps_cuda(decoded.frames_rgb_u8, decoded.is_i_positions, cfg_.energy_pct);
-  energy = resize_to_input_cuda(energy, cfg_.input_size, true);
+  energy = resize_to_input_cuda(energy, target_h, target_w, true);
 
   auto resized_frames =
-      resize_to_input_cuda(decoded.frames_rgb_u8.to(at::kFloat), cfg_.input_size, false);
+      resize_to_input_cuda(decoded.frames_rgb_u8.to(at::kFloat), target_h, target_w, false);
 
   auto selection = compute_visible_indices_cuda(energy,
                                                 cfg_.patch_size,

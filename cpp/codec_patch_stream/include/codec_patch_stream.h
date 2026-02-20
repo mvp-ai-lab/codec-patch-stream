@@ -12,6 +12,8 @@ namespace codec_patch_stream {
 struct StreamConfig {
   int64_t sequence_length = 16;
   int64_t input_size = 224;
+  int64_t min_pixels = -1;
+  int64_t max_pixels = -1;
   int64_t patch_size = 14;
   int64_t k_keep = 2048;
   // 0: patch-level top-k, 1: 2x2 block-level top-k (expanded to 4 patches per block)
@@ -82,7 +84,8 @@ std::tuple<at::Tensor, at::Tensor> compute_motion_residual_proxy_small_cuda(
     int64_t search_radius);
 
 at::Tensor resize_to_input_cuda(const at::Tensor& frames_or_energy,
-                                int64_t input_size,
+                                int64_t target_h,
+                                int64_t target_w,
                                 bool is_energy);
 
 SelectionResult compute_visible_indices_cuda(const at::Tensor& energy,

@@ -14,6 +14,8 @@ def main() -> None:
     p.add_argument("video")
     p.add_argument("--frames", type=int, default=16)
     p.add_argument("--input-size", type=int, default=224)
+    p.add_argument("--min-pixels", type=int, default=None)
+    p.add_argument("--max-pixels", type=int, default=None)
     p.add_argument("--patch", type=int, default=14)
     p.add_argument("--topk", type=int, default=512)
     p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32", "bfloat16", "float16", "float32"])
@@ -25,6 +27,8 @@ def main() -> None:
         video_path=args.video,
         sequence_length=args.frames,
         input_size=args.input_size,
+        min_pixels=args.min_pixels,
+        max_pixels=args.max_pixels,
         patch_size=args.patch,
         k_keep=args.topk,
         output_dtype=args.dtype,
@@ -43,8 +47,16 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if metas:
+        canvas_h = (max(int(meta["patch_h_idx"]) for meta in metas) + 1) * args.patch
+        canvas_w = (max(int(meta["patch_w_idx"]) for meta in metas) + 1) * args.patch
+    else:
+        canvas_h = args.patch
+        canvas_w = args.patch
+    print(f"Smart resize target: {canvas_h}x{canvas_w}")
+
     # Prepare black canvases for all sampled frames.
-    canvases = torch.zeros((args.frames, 3, args.input_size, args.input_size), dtype=torch.float32)
+    canvases = torch.zeros((args.frames, 3, canvas_h, canvas_w), dtype=torch.float32)
     frame_id_by_seq_pos: dict[int, int] = {}
     selected_count_by_seq_pos: dict[int, int] = defaultdict(int)
 

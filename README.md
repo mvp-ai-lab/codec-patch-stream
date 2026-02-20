@@ -71,7 +71,9 @@ from codec_patch_stream import CodecPatchStream
 stream = CodecPatchStream(
     video_path="/path/to/video.mp4",
     sequence_length=16,
-    input_size=224,
+    input_size=224,          # compatibility fallback: target area ~= input_size^2
+    min_pixels=None,         # optional lower bound of resized H*W
+    max_pixels=None,         # optional upper bound of resized H*W
     patch_size=14,
     k_keep=512,
     static_fallback=True,   # optional static-scene fallback
@@ -82,6 +84,11 @@ stream = CodecPatchStream(
     output_dtype="bf16",
     backend="auto",         # auto | gpu | cpu
 )
+
+# Resize policy:
+# - smart resize keeps aspect ratio
+# - output H/W are aligned to patch_size*2
+# - if min_pixels/max_pixels are unset, it falls back to input_size^2
 
 for patch, meta in stream:
     # patch: (3, 14, 14) bf16 tensor on selected backend device
@@ -133,7 +140,8 @@ Environment knobs:
 
 ```bash
 python examples/demo_patch_stream.py ./assets/demo.mp4 \
-    --frames 16 --input-size 224 --patch 14 --topk 1024 --dtype bf16 \
+    --frames 16 --input-size 224 --min-pixels 50176 --max-pixels 50176 \
+    --patch 14 --topk 1024 --dtype bf16 \
     --backend auto --out-dir patch_viz
 ```
 

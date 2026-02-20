@@ -76,6 +76,8 @@ def _build_stream(args: argparse.Namespace) -> CodecPatchStream:
         video_path=args.video,
         sequence_length=args.frames,
         input_size=args.input_size,
+        min_pixels=args.min_pixels,
+        max_pixels=args.max_pixels,
         patch_size=args.patch,
         k_keep=args.topk,
         static_fallback=args.static_fallback,
@@ -244,6 +246,8 @@ def _print_selected_params(args: argparse.Namespace) -> None:
         ("backend", str(args.backend)),
         ("sequence_length", str(args.frames)),
         ("input_size", str(args.input_size)),
+        ("min_pixels", str(args.min_pixels)),
+        ("max_pixels", str(args.max_pixels)),
         ("patch_size", str(args.patch)),
         ("k_keep", str(args.topk)),
         ("output_dtype", args.dtype),
@@ -262,6 +266,8 @@ def main() -> None:
     p.add_argument("video", type=str)
     p.add_argument("--frames", type=int, default=16)
     p.add_argument("--input-size", type=int, default=224)
+    p.add_argument("--min-pixels", type=int, default=None)
+    p.add_argument("--max-pixels", type=int, default=None)
     p.add_argument("--patch", type=int, default=14)
     p.add_argument("--topk", type=int, default=1024)
     p.add_argument(
