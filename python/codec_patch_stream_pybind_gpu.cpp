@@ -64,6 +64,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "codec_patch_stream native backend";
 
   m.def("version", []() { return codec_patch_stream::version(); });
+  m.def("decode_uniform_frames",
+        [](const std::string& video_path,
+           int64_t sequence_length,
+           int64_t device_id,
+           const std::string& mode) {
+          auto out =
+              codec_patch_stream::decode_uniform_frames_nvdec(video_path,
+                                                              sequence_length,
+                                                              device_id,
+                                                              mode);
+          py::dict d;
+          d["frames"] = out.frames_rgb_u8;
+          d["sampled_frame_ids"] = out.sampled_frame_ids;
+          d["fps"] = out.fps;
+          d["duration_sec"] = out.duration_sec;
+          d["width"] = out.width;
+          d["height"] = out.height;
+          return d;
+        },
+        py::arg("video_path"),
+        py::arg("sequence_length") = 16,
+        py::arg("device_id") = 0,
+        py::arg("mode") = "throughput");
   m.def("linear_to_thw",
         &codec_patch_stream::linear_to_thw,
         "Map linear patch index to (t,h,w)");

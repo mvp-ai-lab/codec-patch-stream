@@ -55,7 +55,13 @@ struct SelectionResult {
 
 DecodeResult decode_sampled_frames_nvdec(const std::string& video_path,
                                          int64_t sequence_length,
-                                         int64_t device_id);
+                                         int64_t device_id,
+                                         const std::string& mode = "throughput");
+
+DecodeResult decode_uniform_frames_nvdec(const std::string& video_path,
+                                         int64_t sequence_length,
+                                         int64_t device_id,
+                                         const std::string& mode = "throughput");
 
 void launch_nv12_to_rgb_cuda(const uint8_t* y_plane,
                              const uint8_t* uv_plane,

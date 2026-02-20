@@ -1,10 +1,63 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import shutil
 from pathlib import Path
 
 from setuptools import find_packages, setup
+
+
+def _detect_torch_cuda_arch_list() -> str | None:
+    """Detect local GPU compute capabilities and convert to TORCH_CUDA_ARCH_LIST format."""
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=compute_cap",
+                "--format=csv,noheader",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    caps: list[str] = []
+    for raw in out.splitlines():
+        cap = raw.strip()
+        if not cap:
+            continue
+        parts = cap.split(".", 1)
+        if len(parts) != 2:
+            continue
+        major, minor = parts[0].strip(), parts[1].strip()
+        if not (major.isdigit() and minor.isdigit()):
+            continue
+        normalized = f"{int(major)}.{int(minor)}"
+        if normalized not in caps:
+            caps.append(normalized)
+    if not caps:
+        return None
+    return ";".join(caps)
+
+
+def _maybe_configure_cuda_arch_list() -> str | None:
+    # Priority: user explicit CODEC_CUDA_ARCH_LIST > existing TORCH_CUDA_ARCH_LIST > auto detect.
+    codec_arch = os.getenv("CODEC_CUDA_ARCH_LIST", "").strip()
+    if codec_arch:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = codec_arch
+        return codec_arch
+
+    torch_arch = os.getenv("TORCH_CUDA_ARCH_LIST", "").strip()
+    if torch_arch:
+        return torch_arch
+
+    detected = _detect_torch_cuda_arch_list()
+    if detected:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = detected
+        return detected
+    return None
 
 
 def _get_extensions():
@@ -66,6 +119,10 @@ def _get_extensions():
         raise RuntimeError("CODEC_ENABLE_GPU=1 but nvcc was not found in PATH")
 
     if should_build_gpu:
+        _maybe_configure_cuda_arch_list()
+        nvcc_args = ["-O3", "--use_fast_math", "-std=c++17"]
+        if os.getenv("CODEC_NVCC_LINEINFO", "0").strip() == "1":
+            nvcc_args.append("-lineinfo")
         ext_modules.append(
             CUDAExtension(
                 name="codec_patch_stream._codec_patch_stream_gpu",
@@ -81,7 +138,7 @@ def _get_extensions():
                 include_dirs=include_dirs,
                 extra_compile_args={
                     "cxx": cxx_args,
-                    "nvcc": ["-O3", "--use_fast_math", "-lineinfo", "-std=c++17"],
+                    "nvcc": nvcc_args,
                 },
                 extra_link_args=common_link_args,
             )
@@ -95,7 +152,7 @@ ext_modules = _get_extensions()
 if ext_modules:
     from torch.utils.cpp_extension import BuildExtension
 
-    cmdclass = {"build_ext": BuildExtension}
+    cmdclass = {"build_ext": BuildExtension.with_options(use_ninja=True)}
 
 setup(
     name="codec-patch-stream",

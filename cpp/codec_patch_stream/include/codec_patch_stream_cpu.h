@@ -57,6 +57,9 @@ struct SelectionResult {
 DecodeResult decode_sampled_frames_ffmpeg_cpu(const std::string& video_path,
                                               int64_t sequence_length);
 
+DecodeResult decode_uniform_frames_ffmpeg_cpu(const std::string& video_path,
+                                              int64_t sequence_length);
+
 at::Tensor compute_energy_maps_cpu(const at::Tensor& frames_rgb_u8,
                                    const at::Tensor& mv_magnitude_maps,
                                    const std::vector<uint8_t>& is_i_positions,

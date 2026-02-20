@@ -39,6 +39,30 @@ CODEC_BUILD_NATIVE=1 CODEC_ENABLE_GPU=0 uv pip install -e . --python .venv/bin/p
 CODEC_BUILD_NATIVE=1 uv pip install -e . --python .venv/bin/python --no-build-isolation
 ```
 
+### Faster GPU build tips
+
+- Default behavior now auto-detects local GPU compute capability and sets `TORCH_CUDA_ARCH_LIST` automatically when possible.
+- For deterministic and faster builds, you can still set it manually:
+
+```bash
+# H200 / H100 class GPU
+export TORCH_CUDA_ARCH_LIST=9.0
+# or project-specific alias (higher priority than TORCH_CUDA_ARCH_LIST)
+export CODEC_CUDA_ARCH_LIST=9.0
+```
+
+- Enable parallel compile workers:
+
+```bash
+export MAX_JOBS=16
+```
+
+- Enable CUDA line mapping only when debugging kernels (slower compile):
+
+```bash
+export CODEC_NVCC_LINEINFO=1
+```
+
 ## Quick usage
 
 ```python
@@ -73,6 +97,37 @@ patches, meta_fields, meta_scores = stream.next_n_tensors(256)
 # full metadata tensors for all selected patches
 all_meta_fields, all_meta_scores = stream.metadata_tensors
 ```
+
+## Pure decode API (fair comparison with decord)
+
+```python
+from codec_patch_stream import decode_uniform_frames
+
+decoded = decode_uniform_frames(
+    video_path="/path/to/video.mp4",
+    num_frames=16,
+    backend="auto",   # auto | gpu | cpu
+    device_id=0,
+    mode="throughput",  # throughput | latency | auto
+)
+
+# torch.Tensor, shape: (T, H, W, 3), dtype: uint8
+frames = decoded.frames
+
+# decord-like numpy output
+frames_np = decoded.asnumpy()
+```
+
+GPU NVDEC mode controls:
+
+- `mode="throughput"`: default for batchsize=1 sequential workloads, uses per-device decoder session pool.
+- `mode="latency"`: single-session mode for lower control overhead and deterministic behavior.
+- `mode="auto"`: follow `CODEC_NVDEC_MODE` env (fallback: `throughput`).
+
+Environment knobs:
+
+- `CODEC_NVDEC_SESSION_POOL_SIZE`: session count used in throughput mode (default: `2`).
+- `CODEC_NVDEC_MODE`: default decode mode when API `mode="auto"` (or empty override).
 
 `static_fallback` only adjusts P-frame selection under the remaining global budget after I-frame priority.
 
