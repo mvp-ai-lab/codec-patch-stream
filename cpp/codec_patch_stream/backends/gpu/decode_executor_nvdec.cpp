@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
+#include <cuda.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -45,7 +47,59 @@ void check_ff(int ret, const char* where) {
   }
 }
 
+// Try to reuse an existing CUDA context (typically PyTorch's primary
+// context) by manually constructing the AVHWDeviceContext instead of
+// going through av_hwdevice_ctx_create.  This avoids the host-side
+// memory allocation that av_hwdevice_ctx_create performs internally,
+// which can fail with "Cannot allocate memory" when host resources
+// are fragmented after large model loading.
+//
+// Returns true on success (*hw_device_ctx is set), false on failure.
+bool try_reuse_existing_cuda_ctx(AVBufferRef** hw_device_ctx,
+                                 int64_t device_id) {
+  // Activate the target device so cuCtxGetCurrent returns its context.
+  c10::cuda::CUDAGuard guard(static_cast<c10::DeviceIndex>(device_id));
+
+  // Force PyTorch to initialise CUDA on this device (no-op if already done).
+  at::cuda::getCurrentCUDAStream(static_cast<c10::DeviceIndex>(device_id));
+
+  CUcontext cu_ctx = nullptr;
+  CUresult cu_err = cuCtxGetCurrent(&cu_ctx);
+  if (cu_err != CUDA_SUCCESS || cu_ctx == nullptr) {
+    return false;
+  }
+
+  AVBufferRef* ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
+  if (!ctx) {
+    return false;
+  }
+
+  auto* device_ctx =
+      reinterpret_cast<AVHWDeviceContext*>(ctx->data);
+  auto* cuda_device_ctx =
+      reinterpret_cast<AVCUDADeviceContext*>(device_ctx->hwctx);
+
+  // Hand our existing CUcontext to FFmpeg.  av_hwdevice_ctx_init will
+  // use it directly instead of creating a new one.
+  cuda_device_ctx->cuda_ctx = cu_ctx;
+
+  int ret = av_hwdevice_ctx_init(ctx);
+  if (ret < 0) {
+    av_buffer_unref(&ctx);
+    return false;
+  }
+
+  *hw_device_ctx = ctx;
+  return true;
+}
+
 void create_hw_device_ctx_cuda(AVBufferRef** hw_device_ctx, int64_t device_id) {
+  // First, try to reuse an existing CUDA context from PyTorch.
+  // This is the most reliable path after large model loading.
+  if (try_reuse_existing_cuda_ctx(hw_device_ctx, device_id)) {
+    return;
+  }
+
   char device_name[16];
   std::snprintf(device_name, sizeof(device_name), "%lld",
                 static_cast<long long>(device_id));
