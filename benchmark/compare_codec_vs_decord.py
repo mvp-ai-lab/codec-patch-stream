@@ -9,9 +9,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import torch
+
+DEFAULT_EXTS = ("mp4", "mkv", "avi", "mov", "webm", "flv", "m4v", "ts")
 
 
 def print_table(headers: list[str], rows: list[list[str]], title: str | None = None) -> None:
@@ -38,6 +41,43 @@ def normalize_dtype(dtype: object) -> str:
     return s
 
 
+def normalize_exts(raw_exts: Iterable[str]) -> set[str]:
+    out: set[str] = set()
+    for ext in raw_exts:
+        e = ext.strip().lower()
+        if not e:
+            continue
+        if e.startswith("."):
+            e = e[1:]
+        out.add(e)
+    if not out:
+        raise ValueError("No valid extensions from --ext")
+    return out
+
+
+def collect_videos(
+    input_path: Path, exts: set[str], recursive: bool, limit: int
+) -> list[Path]:
+    if input_path.is_file():
+        return [input_path]
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"Input path not found: {input_path}")
+    pattern = "**/*" if recursive else "*"
+    videos = [
+        p
+        for p in input_path.glob(pattern)
+        if p.is_file() and p.suffix.lower().lstrip(".") in exts
+    ]
+    videos.sort()
+    if limit > 0:
+        videos = videos[:limit]
+    if not videos:
+        raise RuntimeError(
+            f"No videos found in {input_path} with extensions: {sorted(exts)}"
+        )
+    return videos
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -45,7 +85,28 @@ def parse_args() -> argparse.Namespace:
             "(uniformly sample frames; GPU mode avoids host copy, CPU mode uses numpy output)"
         )
     )
-    parser.add_argument("video", type=Path, help="Path to input video")
+    parser.add_argument(
+        "input_path",
+        type=Path,
+        help="Path to input video or a folder containing videos",
+    )
+    parser.add_argument(
+        "--ext",
+        nargs="+",
+        default=list(DEFAULT_EXTS),
+        help="Video extensions for folder mode, e.g. mp4 mkv mov",
+    )
+    parser.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="In folder mode, only scan top-level files",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max number of videos to use in folder mode, 0 means no limit",
+    )
     parser.add_argument("--num-frames", type=int, default=16, help="Uniform sampled frame count")
     parser.add_argument(
         "--gpu",
@@ -77,10 +138,20 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional CPU affinity, e.g. '0-7' or '0,2,4,6'",
     )
-    parser.add_argument("--width", type=int, default=-1, help="Resize width, must be -1 for fair decode-only compare")
-    parser.add_argument("--height", type=int, default=-1, help="Resize height, must be -1 for fair decode-only compare")
-    parser.add_argument("--warmup", type=int, default=5, help="Warmup rounds")
-    parser.add_argument("--runs", type=int, default=20, help="Measured rounds")
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=-1,
+        help="Resize width, must be -1 for fair decode-only compare",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=-1,
+        help="Resize height, must be -1 for fair decode-only compare",
+    )
+    parser.add_argument("--warmup", type=int, default=5, help="Warmup rounds per video")
+    parser.add_argument("--runs", type=int, default=20, help="Measured rounds per video")
     parser.add_argument(
         "--order",
         type=str,
@@ -264,7 +335,7 @@ class DecodeWorker:
         cmd = [
             sys.executable,
             str(script),
-            str(args.video),
+            str(args.input_path),
             "--num-frames",
             str(args.num_frames),
             "--decord-gpu",
@@ -293,25 +364,29 @@ class DecodeWorker:
             bufsize=1,
         )
 
-    def run_once(self) -> tuple[float, tuple[int, ...], str]:
+    def run_once(self, video_path: Path | None = None) -> tuple[float, tuple[int, ...], str]:
         if self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError(f"{self.lib} worker has no stdio pipes")
         if self.proc.poll() is not None:
             raise RuntimeError(f"{self.lib} worker exited early with code {self.proc.returncode}")
 
-        self.proc.stdin.write("run\n")
+        payload: dict[str, object] = {"cmd": "run"}
+        if video_path is not None:
+            payload["video"] = str(video_path)
+        self.proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
         self.proc.stdin.flush()
+
         line = self.proc.stdout.readline()
         if not line:
             raise RuntimeError(f"{self.lib} worker closed stdout unexpectedly")
-        payload = json.loads(line)
-        if not payload.get("ok", False):
-            msg = payload.get("error", "unknown worker error")
+        reply = json.loads(line)
+        if not reply.get("ok", False):
+            msg = reply.get("error", "unknown worker error")
             raise RuntimeError(f"{self.lib} worker failed: {msg}")
 
-        elapsed = float(payload["elapsed"])
-        shape = tuple(int(x) for x in payload["shape"])
-        dtype = str(payload["dtype"])
+        elapsed = float(reply["elapsed"])
+        shape = tuple(int(x) for x in reply["shape"])
+        dtype = str(reply["dtype"])
         return elapsed, shape, dtype
 
     def close(self) -> None:
@@ -319,7 +394,7 @@ class DecodeWorker:
             return
         try:
             if self.proc.stdin is not None:
-                self.proc.stdin.write("exit\n")
+                self.proc.stdin.write(json.dumps({"cmd": "exit"}) + "\n")
                 self.proc.stdin.flush()
                 self.proc.stdin.close()
         except Exception:
@@ -336,21 +411,59 @@ def worker_loop(args: argparse.Namespace, decord_gpu: int, codec_gpu: int) -> in
     if lib not in {"decord", "codec"}:
         return 2
 
+    default_video: Path | None = args.input_path if args.input_path.is_file() else None
+
     while True:
         line = sys.stdin.readline()
         if not line:
             return 0
-        cmd = line.strip().lower()
+        raw = line.strip()
+        if not raw:
+            continue
+
+        cmd = ""
+        payload: dict[str, object] = {}
+        if raw.startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except Exception as exc:
+                print(
+                    json.dumps({"ok": False, "error": f"invalid json command: {exc}"}),
+                    flush=True,
+                )
+                continue
+            cmd = str(payload.get("cmd", "")).strip().lower()
+        else:
+            cmd = raw.lower()
+
         if cmd == "exit":
             return 0
         if cmd != "run":
             print(json.dumps({"ok": False, "error": f"unknown command: {cmd}"}), flush=True)
             continue
 
+        video_raw = payload.get("video")
+        if video_raw is None:
+            video_path = default_video
+        else:
+            video_path = Path(str(video_raw))
+        if video_path is None or not video_path.is_file():
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "run command requires a valid video path in worker mode",
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            continue
+
         try:
             if lib == "decord":
                 elapsed, shape, dtype = run_decord_once(
-                    video_path=args.video,
+                    video_path=video_path,
                     num_frames=args.num_frames,
                     gpu=decord_gpu,
                     cpu_threads=args.cpu_threads,
@@ -359,7 +472,7 @@ def worker_loop(args: argparse.Namespace, decord_gpu: int, codec_gpu: int) -> in
                 )
             else:
                 elapsed, shape, dtype = run_codec_once(
-                    video_path=args.video,
+                    video_path=video_path,
                     num_frames=args.num_frames,
                     gpu=codec_gpu,
                     cpu_threads=args.cpu_threads,
@@ -394,8 +507,13 @@ def main() -> None:
     if args.worker_lib:
         raise SystemExit(worker_loop(args, decord_gpu, codec_gpu))
 
-    if not args.video.exists():
-        raise FileNotFoundError(f"Video not found: {args.video}")
+    exts = normalize_exts(args.ext)
+    if args.limit < 0:
+        raise ValueError("--limit must be >= 0")
+    videos = collect_videos(
+        args.input_path, exts, recursive=not args.no_recursive, limit=int(args.limit)
+    )
+
     if args.num_frames <= 0:
         raise ValueError("--num-frames must be > 0")
     if args.cpu_threads < 0:
@@ -425,51 +543,56 @@ def main() -> None:
             workers["decord"] = DecodeWorker("decord", args, decord_gpu, codec_gpu)
             workers["codec"] = DecodeWorker("codec", args, decord_gpu, codec_gpu)
 
-        for i in range(total_rounds):
-            first, second = pick_order(args.order, i)
-            round_results: dict[str, tuple[float, tuple[int, ...], str]] = {}
+        for vid_idx, video_path in enumerate(videos, start=1):
+            if len(videos) > 1:
+                print(f"[{vid_idx}/{len(videos)}] {video_path}")
+            for i in range(total_rounds):
+                first, second = pick_order(args.order, i)
+                round_results: dict[str, tuple[float, tuple[int, ...], str]] = {}
 
-            for lib in (first, second):
-                if use_isolation:
-                    elapsed, shape, dtype = workers[lib].run_once()
-                elif lib == "decord":
-                    elapsed, shape, dtype = run_decord_once(
-                        video_path=args.video,
-                        num_frames=args.num_frames,
-                        gpu=decord_gpu,
-                        cpu_threads=args.cpu_threads,
-                        width=args.width,
-                        height=args.height,
-                    )
-                else:
-                    elapsed, shape, dtype = run_codec_once(
-                        video_path=args.video,
-                        num_frames=args.num_frames,
-                        gpu=codec_gpu,
-                        cpu_threads=args.cpu_threads,
-                        mode=args.codec_mode,
-                    )
+                for lib in (first, second):
+                    if use_isolation:
+                        elapsed, shape, dtype = workers[lib].run_once(video_path)
+                    elif lib == "decord":
+                        elapsed, shape, dtype = run_decord_once(
+                            video_path=video_path,
+                            num_frames=args.num_frames,
+                            gpu=decord_gpu,
+                            cpu_threads=args.cpu_threads,
+                            width=args.width,
+                            height=args.height,
+                        )
+                    else:
+                        elapsed, shape, dtype = run_codec_once(
+                            video_path=video_path,
+                            num_frames=args.num_frames,
+                            gpu=codec_gpu,
+                            cpu_threads=args.cpu_threads,
+                            mode=args.codec_mode,
+                        )
 
-                round_results[lib] = (elapsed, shape, dtype)
-                if i >= args.warmup:
-                    samples[lib].append(elapsed)
-                    if out_shape[lib] is None:
-                        out_shape[lib] = shape
-                        out_dtype[lib] = dtype
+                    round_results[lib] = (elapsed, shape, dtype)
+                    if i >= args.warmup:
+                        samples[lib].append(elapsed)
+                        if out_shape[lib] is None:
+                            out_shape[lib] = shape
+                            out_dtype[lib] = dtype
 
-            if strict_check:
-                d_shape = round_results["decord"][1]
-                c_shape = round_results["codec"][1]
-                d_dtype = round_results["decord"][2]
-                c_dtype = round_results["codec"][2]
-                if d_shape != c_shape:
-                    raise RuntimeError(
-                        f"Output shape mismatch: decord={d_shape}, codec-patch-stream={c_shape}"
-                    )
-                if d_dtype != c_dtype:
-                    raise RuntimeError(
-                        f"Output dtype mismatch: decord={d_dtype}, codec-patch-stream={c_dtype}"
-                    )
+                if strict_check:
+                    d_shape = round_results["decord"][1]
+                    c_shape = round_results["codec"][1]
+                    d_dtype = round_results["decord"][2]
+                    c_dtype = round_results["codec"][2]
+                    if d_shape != c_shape:
+                        raise RuntimeError(
+                            f"Output shape mismatch at video={video_path}: "
+                            f"decord={d_shape}, codec-patch-stream={c_shape}"
+                        )
+                    if d_dtype != c_dtype:
+                        raise RuntimeError(
+                            f"Output dtype mismatch at video={video_path}: "
+                            f"decord={d_dtype}, codec-patch-stream={c_dtype}"
+                        )
     finally:
         for w in workers.values():
             w.close()
@@ -489,7 +612,9 @@ def main() -> None:
     print_table(
         headers=["Field", "Value"],
         rows=[
-            ["video", str(args.video)],
+            ["input_path", str(args.input_path)],
+            ["videos_total", str(len(videos))],
+            ["video_limit", "none" if args.limit == 0 else str(args.limit)],
             ["decord_context", "cpu" if decord_gpu < 0 else f"gpu:{decord_gpu}"],
             ["codec_context", "cpu" if codec_gpu < 0 else f"gpu:{codec_gpu}"],
             ["process_isolation", str(use_isolation)],
@@ -499,7 +624,8 @@ def main() -> None:
             ["codec_mode", args.codec_mode],
             ["width", str(args.width)],
             ["height", str(args.height)],
-            ["runs", f"{args.runs} (warmup={args.warmup})"],
+            ["runs_per_video", f"{args.runs} (warmup={args.warmup})"],
+            ["measured_samples", str(len(samples["decord"]))],
             ["order", args.order],
             ["strict_shape_check", str(strict_check)],
             [

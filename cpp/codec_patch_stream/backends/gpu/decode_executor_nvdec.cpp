@@ -41,6 +41,20 @@ std::string ff_err_str(int errnum) {
   return std::string(buf);
 }
 
+std::string cu_err_str(CUresult cu_err) {
+  const char* name = nullptr;
+  const char* msg = nullptr;
+  cuGetErrorName(cu_err, &name);
+  cuGetErrorString(cu_err, &msg);
+  std::string out = name ? std::string(name) : "CUDA_ERROR_UNKNOWN";
+  if (msg && msg[0] != '\0') {
+    out += " (";
+    out += msg;
+    out += ")";
+  }
+  return out;
+}
+
 void check_ff(int ret, const char* where) {
   if (ret < 0) {
     throw std::runtime_error(std::string(where) + " failed: " + ff_err_str(ret));
@@ -56,7 +70,8 @@ void check_ff(int ret, const char* where) {
 //
 // Returns true on success (*hw_device_ctx is set), false on failure.
 bool try_reuse_existing_cuda_ctx(AVBufferRef** hw_device_ctx,
-                                 int64_t device_id) {
+                                 int64_t device_id,
+                                 std::string* fail_reason = nullptr) {
   // Activate the target device so cuCtxGetCurrent returns its context.
   c10::cuda::CUDAGuard guard(static_cast<c10::DeviceIndex>(device_id));
 
@@ -66,11 +81,17 @@ bool try_reuse_existing_cuda_ctx(AVBufferRef** hw_device_ctx,
   CUcontext cu_ctx = nullptr;
   CUresult cu_err = cuCtxGetCurrent(&cu_ctx);
   if (cu_err != CUDA_SUCCESS || cu_ctx == nullptr) {
+    if (fail_reason) {
+      *fail_reason = "cuCtxGetCurrent failed: " + cu_err_str(cu_err);
+    }
     return false;
   }
 
   AVBufferRef* ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
   if (!ctx) {
+    if (fail_reason) {
+      *fail_reason = "av_hwdevice_ctx_alloc(cuda) returned null";
+    }
     return false;
   }
 
@@ -85,6 +106,9 @@ bool try_reuse_existing_cuda_ctx(AVBufferRef** hw_device_ctx,
 
   int ret = av_hwdevice_ctx_init(ctx);
   if (ret < 0) {
+    if (fail_reason) {
+      *fail_reason = "av_hwdevice_ctx_init(cuda) failed: " + ff_err_str(ret);
+    }
     av_buffer_unref(&ctx);
     return false;
   }
@@ -94,43 +118,62 @@ bool try_reuse_existing_cuda_ctx(AVBufferRef** hw_device_ctx,
 }
 
 void create_hw_device_ctx_cuda(AVBufferRef** hw_device_ctx, int64_t device_id) {
-  // First, try to reuse an existing CUDA context from PyTorch.
-  // This is the most reliable path after large model loading.
-  if (try_reuse_existing_cuda_ctx(hw_device_ctx, device_id)) {
-    return;
-  }
-
   char device_name[16];
   std::snprintf(device_name, sizeof(device_name), "%lld",
                 static_cast<long long>(device_id));
 
-  // Prefer CUDA primary context so FFmpeg shares the context with PyTorch.
-  int ret = av_hwdevice_ctx_create(hw_device_ctx,
-                                   AV_HWDEVICE_TYPE_CUDA,
-                                   device_name,
-                                   nullptr,
-                                   AV_CUDA_USE_PRIMARY_CONTEXT);
-  if (ret >= 0) {
+  std::string errors;
+  auto append_error = [&errors](const char* stage, int code) {
+    if (!errors.empty()) {
+      errors += "; ";
+    }
+    errors += stage;
+    errors += "=";
+    errors += ff_err_str(code);
+  };
+
+  auto try_create = [&](const char* stage, const char* dev, int flags) -> bool {
+    const int ret = av_hwdevice_ctx_create(
+        hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, dev, nullptr, flags);
+    if (ret >= 0) {
+      return true;
+    }
+    append_error(stage, ret);
+    return false;
+  };
+
+  // Prefer legacy creation first (same behavior as ffmpeg CLI default).
+  // Some driver/runtime combinations fail primary-context mode once a runtime
+  // context is already active in-process.
+  if (try_create("legacy_device", device_name, 0)) {
+    return;
+  }
+  if (try_create("legacy_default", nullptr, 0)) {
+    return;
+  }
+  if (try_create("primary_device", device_name, AV_CUDA_USE_PRIMARY_CONTEXT)) {
+    return;
+  }
+  if (try_create("primary_default", nullptr, AV_CUDA_USE_PRIMARY_CONTEXT)) {
     return;
   }
 
-  // Fallback: let FFmpeg pick default visible CUDA device with primary context.
-  ret = av_hwdevice_ctx_create(hw_device_ctx,
-                               AV_HWDEVICE_TYPE_CUDA,
-                               nullptr,
-                               nullptr,
-                               AV_CUDA_USE_PRIMARY_CONTEXT);
-  if (ret >= 0) {
+  // Final fallback: reuse an existing CUDA context from PyTorch.
+  std::string reuse_fail_reason;
+  if (try_reuse_existing_cuda_ctx(hw_device_ctx, device_id, &reuse_fail_reason)) {
     return;
   }
+  if (!errors.empty()) {
+    errors += "; ";
+  }
+  errors += "reuse_existing_ctx=failed";
+  if (!reuse_fail_reason.empty()) {
+    errors += " (";
+    errors += reuse_fail_reason;
+    errors += ")";
+  }
 
-  // Last fallback: legacy behavior without primary-context flag.
-  ret = av_hwdevice_ctx_create(hw_device_ctx,
-                               AV_HWDEVICE_TYPE_CUDA,
-                               device_name,
-                               nullptr,
-                               0);
-  check_ff(ret, "av_hwdevice_ctx_create(cuda)");
+  throw std::runtime_error("av_hwdevice_ctx_create(cuda) failed: " + errors);
 }
 
 std::mutex& hw_ctx_cache_mutex() {
@@ -1678,6 +1721,15 @@ DecodeResult decode_uniform_frames_nvdec(const std::string& video_path,
     }
     throw;
   }
+}
+
+bool warmup_nvdec_hw_device_ctx(int64_t device_id) {
+  AVBufferRef* ctx = get_or_create_cached_hw_device_ctx(device_id);
+  if (!ctx) {
+    return false;
+  }
+  av_buffer_unref(&ctx);
+  return true;
 }
 
 }  // namespace codec_patch_stream

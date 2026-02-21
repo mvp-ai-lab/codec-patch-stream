@@ -135,6 +135,9 @@ def _get_extensions():
         nvcc_args = ["-O3", "--use_fast_math", "-std=c++17"]
         if os.getenv("CODEC_NVCC_LINEINFO", "0").strip() == "1":
             nvcc_args.append("-lineinfo")
+        # decode_executor_nvdec.cpp uses CUDA Driver API (e.g. cuCtxGetCurrent),
+        # which requires explicit linkage to libcuda.
+        gpu_link_args = common_link_args + ["-lcuda"]
         ext_modules.append(
             CUDAExtension(
                 name="codec_patch_stream._codec_patch_stream_gpu",
@@ -154,7 +157,7 @@ def _get_extensions():
                     "cxx": cxx_args,
                     "nvcc": nvcc_args,
                 },
-                extra_link_args=common_link_args,
+                extra_link_args=gpu_link_args,
             )
         )
 

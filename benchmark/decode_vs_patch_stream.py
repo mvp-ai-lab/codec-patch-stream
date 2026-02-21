@@ -7,10 +7,13 @@ import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import torch
 
 from codec_patch_stream import DecodeConfig, PatchStreamConfig, decode_only, patch_stream
+
+DEFAULT_EXTS = ("mp4", "mkv", "avi", "mov", "webm", "flv", "m4v", "ts")
 
 
 @dataclass
@@ -35,6 +38,43 @@ def normalize_dtype(dtype: object) -> str:
     if s.startswith("torch."):
         return s[len("torch.") :]
     return s
+
+
+def normalize_exts(raw_exts: Iterable[str]) -> set[str]:
+    out: set[str] = set()
+    for ext in raw_exts:
+        e = ext.strip().lower()
+        if not e:
+            continue
+        if e.startswith("."):
+            e = e[1:]
+        out.add(e)
+    if not out:
+        raise ValueError("No valid extensions from --ext")
+    return out
+
+
+def collect_videos(
+    input_path: Path, exts: set[str], recursive: bool, limit: int
+) -> list[Path]:
+    if input_path.is_file():
+        return [input_path]
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"Input path not found: {input_path}")
+    pattern = "**/*" if recursive else "*"
+    videos = [
+        p
+        for p in input_path.glob(pattern)
+        if p.is_file() and p.suffix.lower().lstrip(".") in exts
+    ]
+    videos.sort()
+    if limit > 0:
+        videos = videos[:limit]
+    if not videos:
+        raise RuntimeError(
+            f"No videos found in {input_path} with extensions: {sorted(exts)}"
+        )
+    return videos
 
 
 def print_table(title: str, rows: list[tuple[str, str]]) -> None:
@@ -74,12 +114,14 @@ def sync_if_needed(gpu: int) -> None:
         torch.cuda.synchronize(torch.device("cuda", gpu))
 
 
-def run_decode_once(args: argparse.Namespace, backend: str, device_id: int) -> DecodeRun:
+def run_decode_once(
+    video_path: Path, args: argparse.Namespace, backend: str, device_id: int
+) -> DecodeRun:
     sync_if_needed(args.gpu)
     t0 = time.perf_counter()
     decoded = decode_only(
         DecodeConfig(
-            video_path=args.video,
+            video_path=video_path,
             sequence_length=int(args.num_frames),
             backend=backend,
             device_id=int(device_id),
@@ -104,12 +146,14 @@ def run_decode_once(args: argparse.Namespace, backend: str, device_id: int) -> D
     )
 
 
-def run_patch_once(args: argparse.Namespace, backend: str, device_id: int) -> PatchRun:
+def run_patch_once(
+    video_path: Path, args: argparse.Namespace, backend: str, device_id: int
+) -> PatchRun:
     sync_if_needed(args.gpu)
     t0 = time.perf_counter()
     stream = patch_stream(
         PatchStreamConfig(
-            video_path=str(args.video),
+            video_path=str(video_path),
             sequence_length=int(args.num_frames),
             decode_mode=str(args.decode_mode),
             uniform_strategy=str(args.uniform_strategy),
@@ -155,7 +199,28 @@ def parse_args() -> argparse.Namespace:
             "with the same sampled frame count."
         )
     )
-    parser.add_argument("video", type=Path, help="Path to input video")
+    parser.add_argument(
+        "input_path",
+        type=Path,
+        help="Path to input video or a folder containing videos",
+    )
+    parser.add_argument(
+        "--ext",
+        nargs="+",
+        default=list(DEFAULT_EXTS),
+        help="Video extensions for folder mode, e.g. mp4 mkv mov",
+    )
+    parser.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="In folder mode, only scan top-level files",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max number of videos to use in folder mode, 0 means no limit",
+    )
     parser.add_argument(
         "--num-frames",
         type=int,
@@ -168,8 +233,8 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="GPU id, -1 means CPU backend",
     )
-    parser.add_argument("--warmup", type=int, default=3, help="Warmup rounds")
-    parser.add_argument("--runs", type=int, default=10, help="Measured rounds")
+    parser.add_argument("--warmup", type=int, default=3, help="Warmup rounds per video")
+    parser.add_argument("--runs", type=int, default=10, help="Measured rounds per video")
     parser.add_argument(
         "--order",
         type=str,
@@ -234,8 +299,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if not args.video.exists():
-        raise FileNotFoundError(f"Video not found: {args.video}")
+    exts = normalize_exts(args.ext)
+    if args.limit < 0:
+        raise ValueError("--limit must be >= 0")
+    videos = collect_videos(
+        args.input_path, exts, recursive=not args.no_recursive, limit=int(args.limit)
+    )
+
     if args.num_frames <= 0:
         raise ValueError("--num-frames must be > 0")
     if args.warmup < 0:
@@ -260,45 +330,49 @@ def main() -> None:
         device_id = 0
 
     strict_check = not args.no_strict_frame_id_check
-
     total_rounds = args.warmup + args.runs
+
     decode_samples: list[float] = []
     patch_samples: list[float] = []
     frame_id_mismatch_rounds = 0
-
     decode_meta: DecodeRun | None = None
     patch_meta: PatchRun | None = None
 
-    for i in range(total_rounds):
-        first, second = pick_order(args.order, i)
-        round_decode: DecodeRun | None = None
-        round_patch: PatchRun | None = None
+    for vid_idx, video_path in enumerate(videos, start=1):
+        if len(videos) > 1:
+            print(f"[{vid_idx}/{len(videos)}] {video_path}")
 
-        for pipeline in (first, second):
-            if pipeline == "decode":
-                round_decode = run_decode_once(args, backend, device_id)
-            else:
-                round_patch = run_patch_once(args, backend, device_id)
+        for i in range(total_rounds):
+            first, second = pick_order(args.order, i)
+            round_decode: DecodeRun | None = None
+            round_patch: PatchRun | None = None
 
-        if round_decode is None or round_patch is None:
-            raise RuntimeError("Internal error: round did not run both pipelines")
+            for pipeline in (first, second):
+                if pipeline == "decode":
+                    round_decode = run_decode_once(video_path, args, backend, device_id)
+                else:
+                    round_patch = run_patch_once(video_path, args, backend, device_id)
 
-        if round_decode.sampled_frame_ids != round_patch.sampled_frame_ids:
-            frame_id_mismatch_rounds += 1
-            if strict_check:
-                raise RuntimeError(
-                    "Sampled frame ids mismatch between decode-only and patch-streaming.\n"
-                    f"decode ids (head): {round_decode.sampled_frame_ids[:8]}\n"
-                    f"patch  ids (head): {round_patch.sampled_frame_ids[:8]}"
-                )
+            if round_decode is None or round_patch is None:
+                raise RuntimeError("Internal error: round did not run both pipelines")
 
-        if i >= args.warmup:
-            decode_samples.append(round_decode.elapsed_s)
-            patch_samples.append(round_patch.elapsed_s)
-            if decode_meta is None:
-                decode_meta = round_decode
-            if patch_meta is None:
-                patch_meta = round_patch
+            if round_decode.sampled_frame_ids != round_patch.sampled_frame_ids:
+                frame_id_mismatch_rounds += 1
+                if strict_check:
+                    raise RuntimeError(
+                        "Sampled frame ids mismatch between decode-only and patch-streaming.\n"
+                        f"video={video_path}\n"
+                        f"decode ids (head): {round_decode.sampled_frame_ids[:8]}\n"
+                        f"patch  ids (head): {round_patch.sampled_frame_ids[:8]}"
+                    )
+
+            if i >= args.warmup:
+                decode_samples.append(round_decode.elapsed_s)
+                patch_samples.append(round_patch.elapsed_s)
+                if decode_meta is None:
+                    decode_meta = round_decode
+                if patch_meta is None:
+                    patch_meta = round_patch
 
     if not decode_samples or not patch_samples or decode_meta is None or patch_meta is None:
         raise RuntimeError("No benchmark samples collected")
@@ -313,11 +387,14 @@ def main() -> None:
         verdict = f"patch streaming faster: {(1.0 / slowdown):.3f}x decode-only latency"
 
     cfg_rows = [
-        ("video", str(args.video)),
+        ("input_path", str(args.input_path)),
+        ("videos_total", str(len(videos))),
+        ("video_limit", "none" if args.limit == 0 else str(args.limit)),
         ("context", "cpu" if args.gpu < 0 else f"gpu:{args.gpu}"),
         ("initial_sampled_frames", str(args.num_frames)),
         ("order", args.order),
-        ("runs", f"{args.runs} (warmup={args.warmup})"),
+        ("runs_per_video", f"{args.runs} (warmup={args.warmup})"),
+        ("measured_samples", str(len(decode_samples))),
         ("strict_frame_id_check", str(strict_check)),
         ("frame_id_mismatch_rounds", str(frame_id_mismatch_rounds)),
         ("decode_mode", args.decode_mode),
@@ -372,12 +449,15 @@ def main() -> None:
     if args.json:
         payload = {
             "config": {
-                "video": str(args.video),
+                "input_path": str(args.input_path),
+                "videos_total": len(videos),
+                "video_limit": None if args.limit == 0 else int(args.limit),
                 "context": "cpu" if args.gpu < 0 else f"gpu:{args.gpu}",
                 "initial_sampled_frames": int(args.num_frames),
                 "order": str(args.order),
-                "runs": int(args.runs),
-                "warmup": int(args.warmup),
+                "runs_per_video": int(args.runs),
+                "warmup_per_video": int(args.warmup),
+                "measured_samples": int(len(decode_samples)),
                 "strict_frame_id_check": bool(strict_check),
                 "frame_id_mismatch_rounds": int(frame_id_mismatch_rounds),
                 "decode_mode": str(args.decode_mode),

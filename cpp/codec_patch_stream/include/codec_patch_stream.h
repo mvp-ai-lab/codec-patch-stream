@@ -67,6 +67,11 @@ DecodeResult decode_uniform_frames_nvdec(const std::string& video_path,
                                          int64_t device_id,
                                          const std::string& mode = "throughput");
 
+// Eagerly create and cache FFmpeg CUDA hw-device context for a given device.
+// This helps avoid hwctx initialization instability when other FFmpeg-based
+// libraries are imported later in the same process.
+bool warmup_nvdec_hw_device_ctx(int64_t device_id);
+
 void launch_nv12_to_rgb_cuda(const uint8_t* y_plane,
                              const uint8_t* uv_plane,
                              int y_pitch,

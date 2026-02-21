@@ -47,4 +47,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         req.nvdec_reuse_open_decoder = nvdec_reuse_open_decoder;
         return codec_patch_stream::decode_only_native_gpu(req);
       });
+
+  m.def(
+      "warmup_hw_device_ctx",
+      [](int64_t device_id) {
+        return codec_patch_stream::warmup_nvdec_hw_device_ctx(device_id);
+      },
+      py::arg("device_id") = 0);
 }

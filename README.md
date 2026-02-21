@@ -186,9 +186,25 @@ python benchmark/decode_vs_patch_stream.py ./assets/demo.mp4 \
   --decode-mode throughput --uniform-strategy auto \
   --input-size 224 --patch 14 --topk 2048 --dtype bf16
 
+# decode-only vs patch-stream over a folder (process all matching videos)
+python benchmark/decode_vs_patch_stream.py /path/to/videos \
+  --ext mp4 mkv mov --gpu 0 --num-frames 16 --warmup 3 --runs 10 \
+  --decode-mode throughput --uniform-strategy auto \
+  --input-size 224 --patch 14 --topk 2048 --dtype bf16
+
+# folder-level total time benchmark (decord vs decode_only vs patch_stream)
+python benchmark/folder_decode_vs_patch_stream.py /path/to/videos \
+  --gpu 0 --decord-gpu 0 --num-frames 16 --decode-mode throughput --uniform-strategy auto \
+  --input-size 224 --patch 14 --topk 2048 --dtype bf16
+
 # codec-patch-stream decode vs decord decode
 python benchmark/compare_codec_vs_decord.py ./assets/demo.mp4 \
   --decord-gpu -1 --codec-gpu 0 --num-frames 32 \
+  --warmup 5 --runs 20 --codec-mode throughput
+
+# codec-patch-stream decode vs decord decode over a folder
+python benchmark/compare_codec_vs_decord.py /path/to/videos \
+  --ext mp4 mkv mov --decord-gpu -1 --codec-gpu 0 --num-frames 32 \
   --warmup 5 --runs 20 --codec-mode throughput
 ```
 
