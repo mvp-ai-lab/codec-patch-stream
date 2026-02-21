@@ -5,12 +5,12 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch
-from codec_patch_stream import CodecPatchStream
+from codec_patch_stream import PatchStreamConfig, patch_stream
 from torchvision.utils import save_image
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="CodecPatchStream visualization demo")
+    p = argparse.ArgumentParser(description="codec-patch-stream visualization demo")
     p.add_argument("video")
     p.add_argument("--frames", type=int, default=16)
     p.add_argument("--input-size", type=int, default=224)
@@ -23,20 +23,22 @@ def main() -> None:
     p.add_argument("--out-dir", default="patch_viz")
     args = p.parse_args()
 
-    s = CodecPatchStream(
-        video_path=args.video,
-        sequence_length=args.frames,
-        input_size=args.input_size,
-        min_pixels=args.min_pixels,
-        max_pixels=args.max_pixels,
-        patch_size=args.patch,
-        k_keep=args.topk,
-        output_dtype=args.dtype,
-        backend=args.backend,
-        selection_unit="block2x2",
-        static_fallback=False,
-        energy_pct=95.0,
-        prefetch_depth=3,
+    s = patch_stream(
+        PatchStreamConfig(
+            video_path=args.video,
+            sequence_length=args.frames,
+            input_size=args.input_size,
+            min_pixels=args.min_pixels,
+            max_pixels=args.max_pixels,
+            patch_size=args.patch,
+            k_keep=args.topk,
+            output_dtype=args.dtype,
+            backend=args.backend,
+            selection_unit="block2x2",
+            static_fallback=False,
+            energy_pct=95.0,
+            prefetch_depth=3,
+        )
     )
 
     print(f"Total selected patches: {len(s)}")

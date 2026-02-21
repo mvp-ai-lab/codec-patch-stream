@@ -1,196 +1,49 @@
 #include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <torch/extension.h>
 
-#include <algorithm>
-#include <cctype>
-#include <stdexcept>
 #include <string>
-#include <utility>
 
 #include "codec_patch_stream_cpu.h"
+#include "decode_core.h"
+#include "codec_patch_stream_pybind_backend_common.h"
 
 namespace py = pybind11;
 
-namespace {
-
-at::ScalarType parse_dtype(const std::string& dtype) {
-  std::string key = dtype;
-  std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-
-  if (key == "bfloat16" || key == "bf16") {
-    return at::kBFloat16;
-  }
-  if (key == "float16" || key == "fp16") {
-    return at::kHalf;
-  }
-  if (key == "float32" || key == "fp32") {
-    return at::kFloat;
-  }
-  throw std::invalid_argument("Unsupported output_dtype: " + dtype);
-}
-
-int64_t parse_selection_unit(const std::string& unit) {
-  std::string key = unit;
-  std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  if (key == "patch" || key == "patches") {
-    return 0;
-  }
-  if (key == "block2x2" || key == "block_2x2" || key == "block") {
-    return 1;
-  }
-  throw std::invalid_argument("Unsupported selection_unit: " + unit);
-}
-
-py::dict meta_to_dict(const codec_patch_stream::PatchMeta& m) {
-  py::dict d;
-  d["seq_pos"] = m.seq_pos;
-  d["frame_id"] = m.frame_id;
-  d["is_i"] = m.is_i;
-  d["patch_linear_idx"] = m.patch_linear_idx;
-  d["patch_h_idx"] = m.patch_h_idx;
-  d["patch_w_idx"] = m.patch_w_idx;
-  d["score"] = m.score;
-  return d;
-}
-
-}  // namespace
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.doc() = "codec_patch_stream cpu native backend";
-
-  m.def("version", []() { return codec_patch_stream::version(); });
-  m.def("decode_uniform_frames",
-        [](const std::string& video_path,
-           int64_t sequence_length,
-           int64_t device_id,
-           const std::string& mode) {
-          (void)device_id;
-          (void)mode;
-          auto out = codec_patch_stream::decode_uniform_frames_ffmpeg_cpu(video_path, sequence_length);
-          py::dict d;
-          d["frames"] = out.frames_rgb_u8;
-          d["sampled_frame_ids"] = out.sampled_frame_ids;
-          d["fps"] = out.fps;
-          d["duration_sec"] = out.duration_sec;
-          d["width"] = out.width;
-          d["height"] = out.height;
-          return d;
-        },
-        py::arg("video_path"),
-        py::arg("sequence_length") = 16,
-        py::arg("device_id") = 0,
-        py::arg("mode") = "throughput");
-  m.def("linear_to_thw",
-        &codec_patch_stream::linear_to_thw,
-        "Map linear patch index to (t,h,w)");
-
-  py::class_<codec_patch_stream::CodecPatchStreamNative>(m, "CodecPatchStreamNative")
-      .def(py::init([](const std::string& video_path,
-                       int64_t sequence_length,
-                       int64_t input_size,
-                       int64_t min_pixels,
-                       int64_t max_pixels,
-                       int64_t patch_size,
-                       int64_t k_keep,
-                       const std::string& selection_unit,
-                       bool static_fallback,
-                       double static_abs_thresh,
-                       double static_rel_thresh,
-                       int64_t static_uniform_frames,
-                       double energy_pct,
-                       const std::string& output_dtype,
-                       int64_t device_id,
-                       int64_t prefetch_depth) {
-             codec_patch_stream::StreamConfig cfg;
-             cfg.sequence_length = sequence_length;
-             cfg.input_size = input_size;
-             cfg.min_pixels = min_pixels;
-             cfg.max_pixels = max_pixels;
-             cfg.patch_size = patch_size;
-             cfg.k_keep = k_keep;
-             cfg.selection_unit = parse_selection_unit(selection_unit);
-             cfg.static_fallback = static_fallback;
-             cfg.static_abs_thresh = static_abs_thresh;
-             cfg.static_rel_thresh = static_rel_thresh;
-             cfg.static_uniform_frames = static_uniform_frames;
-             cfg.energy_pct = energy_pct;
-             cfg.output_dtype = parse_dtype(output_dtype);
-             cfg.device_id = device_id;
-             cfg.prefetch_depth = prefetch_depth;
-             return std::make_unique<codec_patch_stream::CodecPatchStreamNative>(video_path,
-                                                                                 cfg);
-           }),
-           py::arg("video_path"),
-           py::arg("sequence_length") = 16,
-           py::arg("input_size") = 224,
-           py::arg("min_pixels") = -1,
-           py::arg("max_pixels") = -1,
-           py::arg("patch_size") = 14,
-           py::arg("k_keep") = 2048,
-           py::arg("selection_unit") = "patch",
-           py::arg("static_fallback") = false,
-           py::arg("static_abs_thresh") = 2.0,
-           py::arg("static_rel_thresh") = 0.15,
-           py::arg("static_uniform_frames") = 4,
-           py::arg("energy_pct") = 95.0,
-           py::arg("output_dtype") = "bfloat16",
-           py::arg("device_id") = 0,
-           py::arg("prefetch_depth") = 3)
-      .def("__len__", &codec_patch_stream::CodecPatchStreamNative::size)
-      .def("reset", &codec_patch_stream::CodecPatchStreamNative::reset)
-      .def("close", &codec_patch_stream::CodecPatchStreamNative::close)
-      .def_property_readonly("patches",
-                             &codec_patch_stream::CodecPatchStreamNative::patch_bank)
-      .def_property_readonly("metadata", [](codec_patch_stream::CodecPatchStreamNative& self) {
-        py::list out;
-        for (const auto& m : self.metadata()) {
-          out.append(meta_to_dict(m));
-        }
-        return out;
-      })
-      .def_property_readonly("metadata_tensors",
-                             [](codec_patch_stream::CodecPatchStreamNative& self) {
-                               return py::make_tuple(self.metadata_fields_gpu(),
-                                                     self.metadata_scores_gpu());
-                             })
-      .def_property_readonly("sampled_frame_ids",
-                             [](codec_patch_stream::CodecPatchStreamNative& self) {
-                               return self.sampled_frame_ids();
-                             })
-      .def_property_readonly("fps",
-                             [](codec_patch_stream::CodecPatchStreamNative& self) {
-                               return self.fps();
-                             })
-      .def_property_readonly("duration_sec",
-                             [](codec_patch_stream::CodecPatchStreamNative& self) {
-                               return self.duration_sec();
-                             })
-      .def("next_n", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
-        auto out = self.next_n(n);
-        py::list metas;
-        for (const auto& m : std::get<1>(out)) {
-          metas.append(meta_to_dict(m));
-        }
-        return py::make_tuple(std::get<0>(out), metas);
-      })
-      .def("next_n_tensors", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
-        auto out = self.next_n_tensors(n);
-        return py::make_tuple(std::get<0>(out), std::get<1>(out), std::get<2>(out));
-      })
-      .def("__iter__", [](codec_patch_stream::CodecPatchStreamNative& self)
-                          -> codec_patch_stream::CodecPatchStreamNative& { return self; },
-           py::return_value_policy::reference_internal)
-      .def("__next__", [](codec_patch_stream::CodecPatchStreamNative& self) {
-        try {
-          auto out = self.next();
-          return py::make_tuple(std::get<0>(out), meta_to_dict(std::get<1>(out)));
-        } catch (const std::out_of_range&) {
-          throw py::stop_iteration();
-        }
+  codec_patch_stream_pybind_common::bind_backend_module(
+      m,
+      "codec_patch_stream cpu native backend",
+      "cpu",
+      [](const std::string& video_path,
+         int64_t sequence_length,
+         int64_t /*device_id*/,
+         const std::string& /*mode*/) {
+        return codec_patch_stream::decode_uniform_frames_ffmpeg_cpu(video_path, sequence_length);
+      },
+      [](const std::string& video_path,
+         int64_t sequence_length,
+         int64_t device_id,
+         const std::string& mode,
+         const std::string& uniform_strategy,
+         const std::string& backend_name,
+         int64_t nvdec_session_pool_size,
+         int64_t uniform_auto_ratio,
+         int64_t decode_threads,
+         const std::string& decode_thread_type,
+         int64_t reader_cache_size,
+         int64_t nvdec_reuse_open_decoder) {
+        codec_patch_stream::DecodeRequest req;
+        req.video_path = video_path;
+        req.sequence_length = sequence_length;
+        req.backend = backend_name;
+        req.device_id = device_id;
+        req.decode_mode = mode;
+        req.uniform_strategy = uniform_strategy;
+        req.nvdec_session_pool_size = nvdec_session_pool_size;
+        req.uniform_auto_ratio = uniform_auto_ratio;
+        req.decode_threads = decode_threads;
+        req.decode_thread_type = decode_thread_type;
+        req.reader_cache_size = reader_cache_size;
+        req.nvdec_reuse_open_decoder = nvdec_reuse_open_decoder;
+        return codec_patch_stream::decode_only_native_cpu(req);
       });
 }

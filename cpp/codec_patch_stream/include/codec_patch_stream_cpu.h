@@ -7,10 +7,14 @@
 #include <tuple>
 #include <vector>
 
+#include "decode_types.h"
+
 namespace codec_patch_stream {
 
 struct StreamConfig {
   int64_t sequence_length = 16;
+  std::string decode_mode = "throughput";
+  std::string uniform_strategy = "auto";
   int64_t input_size = 224;
   int64_t min_pixels = -1;
   int64_t max_pixels = -1;
@@ -25,6 +29,12 @@ struct StreamConfig {
   double energy_pct = 95.0;
   int64_t device_id = 0;
   int64_t prefetch_depth = 3;
+  int64_t nvdec_session_pool_size = -1;
+  int64_t uniform_auto_ratio = -1;
+  int64_t decode_threads = -1;
+  std::string decode_thread_type;
+  int64_t reader_cache_size = -1;
+  int64_t nvdec_reuse_open_decoder = -1;
   at::ScalarType output_dtype = at::kBFloat16;
 };
 
@@ -38,16 +48,7 @@ struct PatchMeta {
   float score = 0.0f;
 };
 
-struct DecodeResult {
-  at::Tensor frames_rgb_u8;
-  at::Tensor mv_magnitude_maps;
-  std::vector<int64_t> sampled_frame_ids;
-  std::vector<uint8_t> is_i_positions;
-  double fps = 0.0;
-  double duration_sec = 0.0;
-  int64_t width = 0;
-  int64_t height = 0;
-};
+using DecodeResult = DecodeResultCanonical;
 
 struct SelectionResult {
   at::Tensor visible_indices;

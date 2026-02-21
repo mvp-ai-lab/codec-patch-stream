@@ -7,13 +7,15 @@ import torch
 from .native_backend import load_native_backend
 
 
-class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool]]]):
-    """Thin Python wrapper over the native C++ stream engine (GPU/CPU backends)."""
+class NativePatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool]]]):
+    """Internal thin wrapper over the native C++ stream engine."""
 
     def __init__(
         self,
         video_path: str,
         sequence_length: int = 16,
+        decode_mode: str = "throughput",
+        uniform_strategy: str = "auto",
         input_size: int = 224,
         min_pixels: int | None = None,
         max_pixels: int | None = None,
@@ -29,11 +31,19 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
         device_id: int = 0,
         prefetch_depth: int = 3,
         backend: str = "auto",
+        nvdec_session_pool_size: int | None = None,
+        uniform_auto_ratio: int | None = None,
+        decode_threads: int | None = None,
+        decode_thread_type: str | None = None,
+        reader_cache_size: int | None = None,
+        nvdec_reuse_open_decoder: bool | None = None,
     ):
         native = load_native_backend(backend)
         self._native = native.CodecPatchStreamNative(
             video_path=video_path,
             sequence_length=int(sequence_length),
+            decode_mode=str(decode_mode),
+            uniform_strategy=str(uniform_strategy),
             input_size=int(input_size),
             min_pixels=-1 if min_pixels is None else int(min_pixels),
             max_pixels=-1 if max_pixels is None else int(max_pixels),
@@ -48,9 +58,22 @@ class CodecPatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | bool
             output_dtype=str(output_dtype),
             device_id=int(device_id),
             prefetch_depth=int(prefetch_depth),
+            backend=str(backend),
+            nvdec_session_pool_size=-1
+            if nvdec_session_pool_size is None
+            else int(nvdec_session_pool_size),
+            uniform_auto_ratio=-1 if uniform_auto_ratio is None else int(uniform_auto_ratio),
+            decode_threads=-1 if decode_threads is None else int(decode_threads),
+            decode_thread_type=""
+            if decode_thread_type is None
+            else str(decode_thread_type),
+            reader_cache_size=-1 if reader_cache_size is None else int(reader_cache_size),
+            nvdec_reuse_open_decoder=-1
+            if nvdec_reuse_open_decoder is None
+            else int(bool(nvdec_reuse_open_decoder)),
         )
 
-    def __iter__(self) -> "CodecPatchStream":
+    def __iter__(self) -> "NativePatchStream":
         return self
 
     def __next__(self) -> Tuple[torch.Tensor, Dict[str, int | float | bool]]:

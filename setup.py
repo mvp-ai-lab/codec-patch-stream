@@ -80,6 +80,7 @@ def _get_extensions():
     src_dir = root / "cpp" / "codec_patch_stream"
     include_dirs = [
         str((src_dir / "include").resolve()),
+        str((src_dir / "core").resolve()),
         "/usr/include/x86_64-linux-gnu",
         "/usr/local/include",
     ]
@@ -94,14 +95,25 @@ def _get_extensions():
     cxx_args = ["-O3", "-std=c++17"]
     ext_modules = [
         CppExtension(
+            name="codec_patch_stream._codec_patch_stream_native",
+            sources=[
+                "python/codec_patch_stream_pybind.cpp",
+            ],
+            include_dirs=include_dirs,
+            extra_compile_args=cxx_args,
+            extra_link_args=[],
+        ),
+        CppExtension(
             name="codec_patch_stream._codec_patch_stream_cpu",
             sources=[
                 "python/codec_patch_stream_pybind_cpu.cpp",
-                "cpp/codec_patch_stream/src/demux_decode_ffmpeg_cpu.cpp",
-                "cpp/codec_patch_stream/src/motion_residual_proxy_cpu.cpp",
-                "cpp/codec_patch_stream/src/patch_select_cpu.cpp",
-                "cpp/codec_patch_stream/src/patch_extract_cpu.cpp",
-                "cpp/codec_patch_stream/src/stream_engine_cpu.cpp",
+                "cpp/codec_patch_stream/core/decode_postprocess.cpp",
+                "cpp/codec_patch_stream/core/decode_core_cpu.cpp",
+                "cpp/codec_patch_stream/backends/cpu/decode_executor_ffmpeg_cpu.cpp",
+                "cpp/codec_patch_stream/patch/energy_cpu.cpp",
+                "cpp/codec_patch_stream/patch/select_cpu.cpp",
+                "cpp/codec_patch_stream/patch/extract_cpu.cpp",
+                "cpp/codec_patch_stream/patch/patch_stream_engine_cpu.cpp",
             ],
             include_dirs=include_dirs,
             extra_compile_args=cxx_args,
@@ -128,12 +140,14 @@ def _get_extensions():
                 name="codec_patch_stream._codec_patch_stream_gpu",
                 sources=[
                     "python/codec_patch_stream_pybind_gpu.cpp",
-                    "cpp/codec_patch_stream/src/demux_decode_nvdec.cpp",
-                    "cpp/codec_patch_stream/src/nv12_to_rgb_kernels.cu",
-                    "cpp/codec_patch_stream/src/motion_residual_proxy_kernels.cu",
-                    "cpp/codec_patch_stream/src/patch_select_kernels.cu",
-                    "cpp/codec_patch_stream/src/patch_extract_kernels.cu",
-                    "cpp/codec_patch_stream/src/stream_engine.cpp",
+                    "cpp/codec_patch_stream/core/decode_postprocess.cpp",
+                    "cpp/codec_patch_stream/core/decode_core_gpu.cpp",
+                    "cpp/codec_patch_stream/backends/gpu/decode_executor_nvdec.cpp",
+                    "cpp/codec_patch_stream/backends/gpu/nv12_to_rgb_kernels.cu",
+                    "cpp/codec_patch_stream/patch/energy_gpu.cu",
+                    "cpp/codec_patch_stream/patch/select_gpu.cu",
+                    "cpp/codec_patch_stream/patch/extract_gpu.cu",
+                    "cpp/codec_patch_stream/patch/patch_stream_engine_gpu.cpp",
                 ],
                 include_dirs=include_dirs,
                 extra_compile_args={

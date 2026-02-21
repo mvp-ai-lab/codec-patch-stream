@@ -1,123 +1,286 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <torch/extension.h>
 
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
 #include <string>
-#include <utility>
-
-#include "codec_patch_stream.h"
 
 namespace py = pybind11;
 
 namespace {
 
-at::ScalarType parse_dtype(const std::string& dtype) {
-  std::string key = dtype;
-  std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+std::string normalize_backend(std::string backend) {
+  std::transform(backend.begin(), backend.end(), backend.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
   });
-
-  if (key == "bfloat16" || key == "bf16") {
-    return at::kBFloat16;
+  if (backend != "auto" && backend != "gpu" && backend != "cpu") {
+    throw std::invalid_argument("backend must be one of: auto, gpu, cpu");
   }
-  if (key == "float16" || key == "fp16") {
-    return at::kHalf;
-  }
-  if (key == "float32" || key == "fp32") {
-    return at::kFloat;
-  }
-  throw std::invalid_argument("Unsupported output_dtype: " + dtype);
+  return backend;
 }
 
-py::dict meta_to_dict(const codec_patch_stream::PatchMeta& m) {
-  py::dict d;
-  d["seq_pos"] = m.seq_pos;
-  d["frame_id"] = m.frame_id;
-  d["is_i"] = m.is_i;
-  d["patch_linear_idx"] = m.patch_linear_idx;
-  d["patch_h_idx"] = m.patch_h_idx;
-  d["patch_w_idx"] = m.patch_w_idx;
-  d["score"] = m.score;
-  return d;
+py::object import_optional(const char* module_name) {
+  try {
+    return py::module_::import(module_name);
+  } catch (const py::error_already_set&) {
+    return py::none();
+  }
+}
+
+py::object import_gpu_module() {
+  return import_optional("codec_patch_stream._codec_patch_stream_gpu");
+}
+
+py::object import_cpu_module() {
+  return import_optional("codec_patch_stream._codec_patch_stream_cpu");
+}
+
+py::object resolve_backend_module(const std::string& backend) {
+  const std::string key = normalize_backend(backend);
+  if (key == "gpu") {
+    auto gpu = import_gpu_module();
+    if (!gpu.is_none()) {
+      return gpu;
+    }
+    throw std::runtime_error("GPU backend module is unavailable");
+  }
+  if (key == "cpu") {
+    auto cpu = import_cpu_module();
+    if (!cpu.is_none()) {
+      return cpu;
+    }
+    throw std::runtime_error("CPU backend module is unavailable");
+  }
+
+  auto gpu = import_gpu_module();
+  if (!gpu.is_none()) {
+    return gpu;
+  }
+  auto cpu = import_cpu_module();
+  if (!cpu.is_none()) {
+    return cpu;
+  }
+  throw std::runtime_error("No available backend modules (gpu/cpu)");
 }
 
 }  // namespace
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.doc() = "codec_patch_stream native backend";
+class CodecPatchStreamNativeDispatch {
+ public:
+  CodecPatchStreamNativeDispatch(const std::string& video_path,
+                                 int64_t sequence_length,
+                                 const std::string& decode_mode,
+                                 const std::string& uniform_strategy,
+                                 int64_t input_size,
+                                 int64_t min_pixels,
+                                 int64_t max_pixels,
+                                 int64_t patch_size,
+                                 int64_t k_keep,
+                                 const std::string& selection_unit,
+                                 bool static_fallback,
+                                 double static_abs_thresh,
+                                 double static_rel_thresh,
+                                 int64_t static_uniform_frames,
+                                 double energy_pct,
+                                 const std::string& output_dtype,
+                                 int64_t device_id,
+                                 int64_t prefetch_depth,
+                                 int64_t nvdec_session_pool_size,
+                                 int64_t uniform_auto_ratio,
+                                 int64_t decode_threads,
+                                 const std::string& decode_thread_type,
+                                 int64_t reader_cache_size,
+                                 int64_t nvdec_reuse_open_decoder,
+                                 const std::string& backend) {
+    py::object mod = resolve_backend_module(backend);
+    impl_ = mod.attr("CodecPatchStreamNative")(video_path,
+                                                sequence_length,
+                                                decode_mode,
+                                                uniform_strategy,
+                                                input_size,
+                                                min_pixels,
+                                                max_pixels,
+                                                patch_size,
+                                                k_keep,
+                                                selection_unit,
+                                                static_fallback,
+                                                static_abs_thresh,
+                                                static_rel_thresh,
+                                                static_uniform_frames,
+                                                energy_pct,
+                                                output_dtype,
+                                                device_id,
+                                                prefetch_depth,
+                                                nvdec_session_pool_size,
+                                                uniform_auto_ratio,
+                                                decode_threads,
+                                                decode_thread_type,
+                                                reader_cache_size,
+                                                nvdec_reuse_open_decoder);
+  }
 
-  m.def("version", []() { return codec_patch_stream::version(); });
-  m.def("decode_uniform_frames",
+  int64_t size() const {
+    return impl_.attr("__len__")().cast<int64_t>();
+  }
+
+  void reset() {
+    impl_.attr("reset")();
+  }
+
+  void close() {
+    impl_.attr("close")();
+  }
+
+  py::object patches() const {
+    return impl_.attr("patches");
+  }
+
+  py::object metadata() const {
+    return impl_.attr("metadata");
+  }
+
+  py::object metadata_tensors() const {
+    return impl_.attr("metadata_tensors");
+  }
+
+  py::object sampled_frame_ids() const {
+    return impl_.attr("sampled_frame_ids");
+  }
+
+  double fps() const {
+    return impl_.attr("fps").cast<double>();
+  }
+
+  double duration_sec() const {
+    return impl_.attr("duration_sec").cast<double>();
+  }
+
+  py::tuple next_n(int64_t n) {
+    return impl_.attr("next_n")(n).cast<py::tuple>();
+  }
+
+  py::tuple next_n_tensors(int64_t n) {
+    return impl_.attr("next_n_tensors")(n).cast<py::tuple>();
+  }
+
+  py::tuple next() {
+    return impl_.attr("__next__")().cast<py::tuple>();
+  }
+
+ private:
+  py::object impl_;
+};
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.doc() = "codec_patch_stream unified pybind entry";
+
+  m.def("has_backend", [](const std::string& backend) {
+    const std::string key = normalize_backend(backend);
+    if (key == "gpu") {
+      return !import_gpu_module().is_none();
+    }
+    if (key == "cpu") {
+      return !import_cpu_module().is_none();
+    }
+    return !import_gpu_module().is_none() || !import_cpu_module().is_none();
+  });
+
+  m.def("version", []() {
+    try {
+      py::object mod = resolve_backend_module("auto");
+      return mod.attr("version")().cast<std::string>();
+    } catch (const std::exception&) {
+      return std::string("unavailable");
+    }
+  });
+
+  m.def("decode_only_native",
         [](const std::string& video_path,
            int64_t sequence_length,
+           const std::string& backend,
            int64_t device_id,
-           const std::string& mode) {
-          auto out =
-              codec_patch_stream::decode_uniform_frames_nvdec(video_path,
-                                                              sequence_length,
-                                                              device_id,
-                                                              mode);
-          py::dict d;
-          d["frames"] = out.frames_rgb_u8;
-          d["sampled_frame_ids"] = out.sampled_frame_ids;
-          d["fps"] = out.fps;
-          d["duration_sec"] = out.duration_sec;
-          d["width"] = out.width;
-          d["height"] = out.height;
-          return d;
+           const std::string& mode,
+           const std::string& uniform_strategy,
+           int64_t nvdec_session_pool_size,
+           int64_t uniform_auto_ratio,
+           int64_t decode_threads,
+           const std::string& decode_thread_type,
+           int64_t reader_cache_size,
+           int64_t nvdec_reuse_open_decoder) {
+          py::object mod = resolve_backend_module(backend);
+          if (py::hasattr(mod, "decode_only_native")) {
+            return mod.attr("decode_only_native")(video_path,
+                                                   sequence_length,
+                                                   device_id,
+                                                   mode,
+                                                   uniform_strategy,
+                                                   nvdec_session_pool_size,
+                                                   uniform_auto_ratio,
+                                                   decode_threads,
+                                                   decode_thread_type,
+                                                   reader_cache_size,
+                                                   nvdec_reuse_open_decoder)
+                .cast<py::dict>();
+          }
+          if (py::hasattr(mod, "decode_uniform_frames")) {
+            return mod.attr("decode_uniform_frames")(video_path,
+                                                      sequence_length,
+                                                      device_id,
+                                                      mode)
+                .cast<py::dict>();
+          }
+          throw std::runtime_error("backend module does not expose decode functions");
         },
         py::arg("video_path"),
         py::arg("sequence_length") = 16,
+        py::arg("backend") = "auto",
         py::arg("device_id") = 0,
-        py::arg("mode") = "throughput");
-  m.def("linear_to_thw",
-        &codec_patch_stream::linear_to_thw,
-        "Map linear patch index to (t,h,w)");
+        py::arg("mode") = "throughput",
+        py::arg("uniform_strategy") = "auto",
+        py::arg("nvdec_session_pool_size") = -1,
+        py::arg("uniform_auto_ratio") = -1,
+        py::arg("decode_threads") = -1,
+        py::arg("decode_thread_type") = "",
+        py::arg("reader_cache_size") = -1,
+        py::arg("nvdec_reuse_open_decoder") = -1);
 
-  py::class_<codec_patch_stream::CodecPatchStreamNative>(m, "CodecPatchStreamNative")
-      .def(py::init([](const std::string& video_path,
-                       int64_t sequence_length,
-                       int64_t input_size,
-                       int64_t min_pixels,
-                       int64_t max_pixels,
-                       int64_t patch_size,
-                       int64_t k_keep,
-                       bool static_fallback,
-                       double static_abs_thresh,
-                       double static_rel_thresh,
-                       int64_t static_uniform_frames,
-                       double energy_pct,
-                       const std::string& output_dtype,
-                       int64_t device_id,
-                       int64_t prefetch_depth) {
-             codec_patch_stream::StreamConfig cfg;
-             cfg.sequence_length = sequence_length;
-             cfg.input_size = input_size;
-             cfg.min_pixels = min_pixels;
-             cfg.max_pixels = max_pixels;
-             cfg.patch_size = patch_size;
-             cfg.k_keep = k_keep;
-             cfg.static_fallback = static_fallback;
-             cfg.static_abs_thresh = static_abs_thresh;
-             cfg.static_rel_thresh = static_rel_thresh;
-             cfg.static_uniform_frames = static_uniform_frames;
-             cfg.energy_pct = energy_pct;
-             cfg.output_dtype = parse_dtype(output_dtype);
-             cfg.device_id = device_id;
-             cfg.prefetch_depth = prefetch_depth;
-             return std::make_unique<codec_patch_stream::CodecPatchStreamNative>(video_path,
-                                                                                 cfg);
-           }),
+  py::class_<CodecPatchStreamNativeDispatch>(m, "CodecPatchStreamNative")
+      .def(py::init<const std::string&,
+                    int64_t,
+                    const std::string&,
+                    const std::string&,
+                    int64_t,
+                    int64_t,
+                    int64_t,
+                    int64_t,
+                    int64_t,
+                    const std::string&,
+                    bool,
+                    double,
+                    double,
+                    int64_t,
+                    double,
+                    const std::string&,
+                    int64_t,
+                    int64_t,
+                    int64_t,
+                    int64_t,
+                    int64_t,
+                    const std::string&,
+                    int64_t,
+                    int64_t,
+                    const std::string&>(),
            py::arg("video_path"),
            py::arg("sequence_length") = 16,
+           py::arg("decode_mode") = "throughput",
+           py::arg("uniform_strategy") = "auto",
            py::arg("input_size") = 224,
            py::arg("min_pixels") = -1,
            py::arg("max_pixels") = -1,
            py::arg("patch_size") = 14,
            py::arg("k_keep") = 2048,
+           py::arg("selection_unit") = "patch",
            py::arg("static_fallback") = false,
            py::arg("static_abs_thresh") = 2.0,
            py::arg("static_rel_thresh") = 0.15,
@@ -125,45 +288,36 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("energy_pct") = 95.0,
            py::arg("output_dtype") = "bfloat16",
            py::arg("device_id") = 0,
-           py::arg("prefetch_depth") = 3)
-      .def("__len__", &codec_patch_stream::CodecPatchStreamNative::size)
-      .def("reset", &codec_patch_stream::CodecPatchStreamNative::reset)
-      .def("close", &codec_patch_stream::CodecPatchStreamNative::close)
-      .def_property_readonly("patches",
-                             &codec_patch_stream::CodecPatchStreamNative::patch_bank)
-      .def_property_readonly("metadata", [](codec_patch_stream::CodecPatchStreamNative& self) {
-        py::list out;
-        for (const auto& m : self.metadata()) {
-          out.append(meta_to_dict(m));
-        }
-        return out;
-      })
-      .def_property_readonly("metadata_tensors",
-                             [](codec_patch_stream::CodecPatchStreamNative& self) {
-                               return py::make_tuple(self.metadata_fields_gpu(),
-                                                     self.metadata_scores_gpu());
-                             })
-      .def("next_n", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
-        auto out = self.next_n(n);
-        py::list metas;
-        for (const auto& m : std::get<1>(out)) {
-          metas.append(meta_to_dict(m));
-        }
-        return py::make_tuple(std::get<0>(out), metas);
-      })
-      .def("next_n_tensors", [](codec_patch_stream::CodecPatchStreamNative& self, int64_t n) {
-        auto out = self.next_n_tensors(n);
-        return py::make_tuple(std::get<0>(out), std::get<1>(out), std::get<2>(out));
-      })
-      .def("__iter__", [](codec_patch_stream::CodecPatchStreamNative& self)
-                          -> codec_patch_stream::CodecPatchStreamNative& { return self; },
+           py::arg("prefetch_depth") = 3,
+           py::arg("nvdec_session_pool_size") = -1,
+           py::arg("uniform_auto_ratio") = -1,
+           py::arg("decode_threads") = -1,
+           py::arg("decode_thread_type") = "",
+           py::arg("reader_cache_size") = -1,
+           py::arg("nvdec_reuse_open_decoder") = -1,
+           py::arg("backend") = "auto")
+      .def("__len__", &CodecPatchStreamNativeDispatch::size)
+      .def("reset", &CodecPatchStreamNativeDispatch::reset)
+      .def("close", &CodecPatchStreamNativeDispatch::close)
+      .def_property_readonly("patches", &CodecPatchStreamNativeDispatch::patches)
+      .def_property_readonly("metadata", &CodecPatchStreamNativeDispatch::metadata)
+      .def_property_readonly("metadata_tensors", &CodecPatchStreamNativeDispatch::metadata_tensors)
+      .def_property_readonly("sampled_frame_ids", &CodecPatchStreamNativeDispatch::sampled_frame_ids)
+      .def_property_readonly("fps", &CodecPatchStreamNativeDispatch::fps)
+      .def_property_readonly("duration_sec", &CodecPatchStreamNativeDispatch::duration_sec)
+      .def("next_n", &CodecPatchStreamNativeDispatch::next_n)
+      .def("next_n_tensors", &CodecPatchStreamNativeDispatch::next_n_tensors)
+      .def("__iter__",
+           [](CodecPatchStreamNativeDispatch& self) -> CodecPatchStreamNativeDispatch& {
+             return self;
+           },
            py::return_value_policy::reference_internal)
-      .def("__next__", [](codec_patch_stream::CodecPatchStreamNative& self) {
-        try {
-          auto out = self.next();
-          return py::make_tuple(std::get<0>(out), meta_to_dict(std::get<1>(out)));
-        } catch (const std::out_of_range&) {
-          throw py::stop_iteration();
-        }
-      });
+      .def("__next__",
+           [](CodecPatchStreamNativeDispatch& self) {
+             try {
+               return self.next();
+             } catch (const py::stop_iteration&) {
+               throw;
+             }
+           });
 }

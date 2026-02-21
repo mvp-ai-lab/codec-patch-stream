@@ -3,10 +3,8 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-_GPU_NATIVE: Any | None = None
-_CPU_NATIVE: Any | None = None
-_GPU_IMPORT_ERROR: Exception | None = None
-_CPU_IMPORT_ERROR: Exception | None = None
+_NATIVE: Any | None = None
+_NATIVE_IMPORT_ERROR: Exception | None = None
 
 
 def _import_optional(module_name: str) -> tuple[Any | None, Exception | None]:
@@ -16,103 +14,55 @@ def _import_optional(module_name: str) -> tuple[Any | None, Exception | None]:
         return None, exc
 
 
-def _load_gpu_native() -> Any | None:
-    global _GPU_NATIVE, _GPU_IMPORT_ERROR
-    if _GPU_NATIVE is not None:
-        return _GPU_NATIVE
-    if _GPU_IMPORT_ERROR is not None:
+def _load_dispatch_native() -> Any | None:
+    global _NATIVE, _NATIVE_IMPORT_ERROR
+    if _NATIVE is not None:
+        return _NATIVE
+    if _NATIVE_IMPORT_ERROR is not None:
         return None
 
-    mod, err = _import_optional("_codec_patch_stream_gpu")
+    mod, err = _import_optional("_codec_patch_stream_native")
     if mod is not None:
-        _GPU_NATIVE = mod
-        return _GPU_NATIVE
+        _NATIVE = mod
+        return _NATIVE
 
-    legacy_mod, legacy_err = _import_optional("_codec_patch_stream_native")
-    if legacy_mod is not None:
-        _GPU_NATIVE = legacy_mod
-        return _GPU_NATIVE
-
-    if err is not None and legacy_err is not None:
-        _GPU_IMPORT_ERROR = RuntimeError(f"{err}; legacy module error: {legacy_err}")
-    else:
-        _GPU_IMPORT_ERROR = err or legacy_err
+    _NATIVE_IMPORT_ERROR = err
     return None
 
 
-def _load_cpu_native() -> Any | None:
-    global _CPU_NATIVE, _CPU_IMPORT_ERROR
-    if _CPU_NATIVE is not None:
-        return _CPU_NATIVE
-    if _CPU_IMPORT_ERROR is not None:
-        return None
-
-    mod, err = _import_optional("_codec_patch_stream_cpu")
-    if mod is not None:
-        _CPU_NATIVE = mod
-        return _CPU_NATIVE
-    _CPU_IMPORT_ERROR = err
-    return None
-
-
-def _fmt_err(prefix: str, err: Exception | None) -> str:
-    if err is None:
-        return f"{prefix}: unavailable"
-    return f"{prefix}: {err}"
+def _normalize_backend(backend: str) -> str:
+    key = str(backend).strip().lower()
+    if key not in {"auto", "gpu", "cpu"}:
+        raise ValueError("backend must be one of: auto, gpu, cpu")
+    return key
 
 
 def has_native_backend(backend: str = "auto") -> bool:
-    key = str(backend).strip().lower()
-    if key == "gpu":
-        return _load_gpu_native() is not None
-    if key == "cpu":
-        return _load_cpu_native() is not None
-    if key == "auto":
-        if _load_gpu_native() is not None:
-            return True
-        return _load_cpu_native() is not None
-    return False
+    key = _normalize_backend(backend)
+    mod = _load_dispatch_native()
+    if mod is None:
+        return False
+    if not hasattr(mod, "has_backend"):
+        return key == "auto"
+    return bool(mod.has_backend(key))
 
 
 def load_native_backend(backend: str = "auto"):
-    key = str(backend).strip().lower()
-    if key == "gpu":
-        mod = _load_gpu_native()
-        if mod is None:
-            detail = _fmt_err("GPU backend import failed", _GPU_IMPORT_ERROR)
-            raise RuntimeError(
-                f"codec_patch_stream GPU backend is required but unavailable ({detail})."
-            )
-        return mod
-
-    if key == "cpu":
-        mod = _load_cpu_native()
-        if mod is None:
-            detail = _fmt_err("CPU backend import failed", _CPU_IMPORT_ERROR)
-            raise RuntimeError(
-                f"codec_patch_stream CPU backend is required but unavailable ({detail})."
-            )
-        return mod
-
-    if key == "auto":
-        mod = _load_gpu_native()
-        if mod is not None:
-            return mod
-        mod = _load_cpu_native()
-        if mod is not None:
-            return mod
-        detail = "; ".join(
-            [
-                _fmt_err("GPU", _GPU_IMPORT_ERROR),
-                _fmt_err("CPU", _CPU_IMPORT_ERROR),
-            ]
+    key = _normalize_backend(backend)
+    mod = _load_dispatch_native()
+    if mod is None:
+        detail = (
+            "unavailable" if _NATIVE_IMPORT_ERROR is None else str(_NATIVE_IMPORT_ERROR)
         )
         raise RuntimeError(
             "codec_patch_stream native backend is required but unavailable. "
-            f"Build with CODEC_BUILD_NATIVE=1. ({detail})"
+            f"Build with CODEC_BUILD_NATIVE=1. (dispatch import failed: {detail})"
         )
 
-    raise ValueError("backend must be one of: auto, gpu, cpu")
+    if hasattr(mod, "has_backend") and not bool(mod.has_backend(key)):
+        raise RuntimeError(f"codec_patch_stream backend '{key}' is unavailable")
+
+    return mod
 
 
 def require_native_backend(backend: str = "auto"):
@@ -120,23 +70,10 @@ def require_native_backend(backend: str = "auto"):
 
 
 def native_version(backend: str = "auto") -> str:
-    key = str(backend).strip().lower()
-    if key == "gpu":
-        mod = _load_gpu_native()
-        return "unavailable" if mod is None else str(mod.version())
-    if key == "cpu":
-        mod = _load_cpu_native()
-        return "unavailable" if mod is None else str(mod.version())
-
-    if _GPU_NATIVE is not None:
-        return f"gpu:{_GPU_NATIVE.version()}"
-    if _CPU_NATIVE is not None:
-        return f"cpu:{_CPU_NATIVE.version()}"
-
-    mod = _load_gpu_native()
-    if mod is not None:
-        return f"gpu:{mod.version()}"
-    mod = _load_cpu_native()
-    if mod is not None:
-        return f"cpu:{mod.version()}"
-    return "unavailable"
+    mod = _load_dispatch_native()
+    if mod is None:
+        return "unavailable"
+    try:
+        return str(mod.version())
+    except Exception:
+        return "unavailable"
