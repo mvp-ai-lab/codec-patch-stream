@@ -2,6 +2,7 @@
 #include <torch/extension.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -15,6 +16,16 @@
 
 namespace codec_patch_stream {
 namespace {
+
+std::string normalize_backend_key(std::string backend, const char* field_name) {
+  std::transform(backend.begin(), backend.end(), backend.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  TORCH_CHECK(backend == "auto" || backend == "cpu" || backend == "gpu",
+              field_name,
+              " must be one of: auto, cpu, gpu");
+  return backend;
+}
 
 int64_t percentile_rank_index(int64_t n, double pct) {
   if (n <= 0) {
@@ -262,12 +273,35 @@ CodecPatchStreamNative::CodecPatchStreamNative(const std::string& video_path,
 }
 
 void CodecPatchStreamNative::prepare() {
+  const std::string decode_backend =
+      normalize_backend_key(cfg_.decode_backend, "decode_backend");
+  std::string process_backend =
+      normalize_backend_key(cfg_.process_backend, "process_backend");
+  const std::string resolved_decode_backend =
+      decode_backend == "auto" ? "cpu" : decode_backend;
+  const std::string resolved_process_backend =
+      process_backend == "auto" ? resolved_decode_backend : process_backend;
+
+  TORCH_CHECK(resolved_decode_backend == "cpu",
+              "CPU backend module does not support decode_backend=",
+              resolved_decode_backend,
+              " for patch_stream; requested combo decode=",
+              resolved_decode_backend,
+              " process=",
+              resolved_process_backend);
+  TORCH_CHECK(resolved_process_backend == "cpu",
+              "CPU backend module does not support process_backend=",
+              resolved_process_backend,
+              " for patch_stream; requested combo decode=",
+              resolved_decode_backend,
+              " process=",
+              resolved_process_backend);
+
   DecodeRequest req;
   req.video_path = video_path_;
   req.sequence_length = cfg_.sequence_length;
-  req.backend = "cpu";
-  req.device_id = cfg_.device_id;
-  req.decode_mode = cfg_.decode_mode;
+  req.decode_backend = resolved_decode_backend;
+  req.decode_device_id = cfg_.decode_device_id;
   req.uniform_strategy = cfg_.uniform_strategy;
   req.nvdec_session_pool_size = cfg_.nvdec_session_pool_size;
   req.uniform_auto_ratio = cfg_.uniform_auto_ratio;
@@ -342,9 +376,9 @@ void CodecPatchStreamNative::prepare() {
                       .clone();
   auto is_i = is_i_cpu.toType(at::kLong).index_select(0, seq_pos);
 
-  metadata_fields_cpu_ =
+  metadata_fields_gpu_ =
       torch::stack({seq_pos, frame_ids, is_i, visible, ph_idx, pw_idx}, 1).contiguous();
-  metadata_scores_cpu_ =
+  metadata_scores_gpu_ =
       selection.scores_flat.index_select(0, visible).toType(at::kFloat).contiguous();
 
   sampled_frame_ids_ = decoded.sampled_frame_ids;
@@ -411,8 +445,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> CodecPatchStreamNative::next_n_te
 
   const int64_t end = std::min<int64_t>(size(), cursor_ + n);
   auto patches = patch_bank_.slice(0, cursor_, end);
-  auto fields = metadata_fields_cpu_.slice(0, cursor_, end);
-  auto scores = metadata_scores_cpu_.slice(0, cursor_, end);
+  auto fields = metadata_fields_gpu_.slice(0, cursor_, end);
+  auto scores = metadata_scores_gpu_.slice(0, cursor_, end);
   cursor_ = end;
   return std::make_tuple(patches, fields, scores);
 }
@@ -421,8 +455,8 @@ void CodecPatchStreamNative::reset() { cursor_ = 0; }
 
 void CodecPatchStreamNative::close() {
   patch_bank_ = at::Tensor();
-  metadata_fields_cpu_ = at::Tensor();
-  metadata_scores_cpu_ = at::Tensor();
+  metadata_fields_gpu_ = at::Tensor();
+  metadata_scores_gpu_ = at::Tensor();
   sampled_frame_ids_.clear();
   fps_ = 0.0;
   duration_sec_ = 0.0;
@@ -440,11 +474,11 @@ const std::vector<PatchMeta>& CodecPatchStreamNative::metadata() const {
 }
 
 const at::Tensor& CodecPatchStreamNative::metadata_fields_gpu() const {
-  return metadata_fields_cpu_;
+  return metadata_fields_gpu_;
 }
 
 const at::Tensor& CodecPatchStreamNative::metadata_scores_gpu() const {
-  return metadata_scores_cpu_;
+  return metadata_scores_gpu_;
 }
 
 const std::vector<int64_t>& CodecPatchStreamNative::sampled_frame_ids() const {
@@ -457,11 +491,11 @@ double CodecPatchStreamNative::duration_sec() const { return duration_sec_; }
 
 std::vector<PatchMeta> CodecPatchStreamNative::metadata_slice_cpu(int64_t begin,
                                                                   int64_t end) const {
-  if (!metadata_fields_cpu_.defined() || end <= begin) {
+  if (!metadata_fields_gpu_.defined() || end <= begin) {
     return {};
   }
-  auto fields_cpu = metadata_fields_cpu_.slice(0, begin, end).contiguous();
-  auto scores_cpu = metadata_scores_cpu_.slice(0, begin, end).contiguous();
+  auto fields_cpu = metadata_fields_gpu_.slice(0, begin, end).contiguous();
+  auto scores_cpu = metadata_scores_gpu_.slice(0, begin, end).contiguous();
   return build_patch_meta_from_cpu_tensors(fields_cpu, scores_cpu);
 }
 
@@ -470,7 +504,7 @@ void CodecPatchStreamNative::materialize_metadata_cpu_cache() const {
     return;
   }
   meta_.clear();
-  if (size() <= 0 || !metadata_fields_cpu_.defined()) {
+  if (size() <= 0 || !metadata_fields_gpu_.defined()) {
     metadata_cached_ = true;
     return;
   }
@@ -478,6 +512,6 @@ void CodecPatchStreamNative::materialize_metadata_cpu_cache() const {
   metadata_cached_ = true;
 }
 
-const char* version() { return "0.3.0"; }
+const char* version() { return "0.4.0"; }
 
 }  // namespace codec_patch_stream

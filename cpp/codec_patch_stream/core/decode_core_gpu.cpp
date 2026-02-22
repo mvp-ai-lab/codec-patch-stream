@@ -48,17 +48,17 @@ DecodeResultCanonical decode_only_native_gpu(const DecodeRequest& req) {
                              req.nvdec_reuse_open_decoder >= 0
                                  ? (req.nvdec_reuse_open_decoder ? "1" : "0")
                                  : "");
-  const std::string resolved_mode = req.decode_mode == "auto" ? "throughput" : req.decode_mode;
+  constexpr const char* resolved_mode = "throughput";
 
   DecodeResult raw;
   if (req.uniform_strategy == "stream") {
     raw = decode_sampled_frames_nvdec(
-        req.video_path, req.sequence_length, req.device_id, resolved_mode);
+        req.video_path, req.sequence_length, req.decode_device_id, resolved_mode);
   } else {
     const char* planner_mode = req.uniform_strategy == "seek" ? "seek" : "auto";
     ScopedEnv env_mode("CODEC_DECODE_UNIFORM_NVDEC_MODE", planner_mode);
     raw = decode_uniform_frames_nvdec(
-        req.video_path, req.sequence_length, req.device_id, resolved_mode);
+        req.video_path, req.sequence_length, req.decode_device_id, resolved_mode);
   }
 
   DecodeResultCanonical out;

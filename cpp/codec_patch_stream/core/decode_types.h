@@ -11,9 +11,8 @@ namespace codec_patch_stream {
 struct DecodeRequest {
   std::string video_path;
   int64_t sequence_length = 16;
-  std::string backend = "auto";  // auto | gpu | cpu
-  int64_t device_id = 0;
-  std::string decode_mode = "throughput";      // throughput | latency | auto
+  std::string decode_backend = "auto";  // auto | gpu | cpu
+  int64_t decode_device_id = 0;
   std::string uniform_strategy = "auto";       // auto | seek | stream
   int64_t nvdec_session_pool_size = -1;        // <0 means library default
   int64_t uniform_auto_ratio = -1;             // <0 means library default

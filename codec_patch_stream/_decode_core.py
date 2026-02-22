@@ -13,9 +13,8 @@ def decode_uniform_frames_core(
     video_path: str | Path,
     sequence_length: int,
     *,
-    backend: str,
-    device_id: int,
-    decode_mode: str,
+    decode_backend: str,
+    decode_device_id: int,
     uniform_strategy: str,
     nvdec_session_pool_size: int | None,
     uniform_auto_ratio: int | None,
@@ -27,9 +26,11 @@ def decode_uniform_frames_core(
     if sequence_length <= 0:
         raise ValueError("sequence_length must be > 0")
 
-    backend_key = str(backend).strip().lower()
-    if backend_key == "auto" and not torch.cuda.is_available():
-        backend_key = "cpu"
+    backend_key = str(decode_backend).strip().lower()
+    if backend_key not in {"auto", "cpu", "gpu"}:
+        raise ValueError("decode_backend must be one of: auto, cpu, gpu")
+    if backend_key == "auto":
+        backend_key = "gpu" if torch.cuda.is_available() else "cpu"
     native = load_native_backend(backend_key)
 
     decode_fn = None
@@ -49,9 +50,8 @@ def decode_uniform_frames_core(
         out: Any = decode_fn(
             video_path=str(video_path),
             sequence_length=int(sequence_length),
-            backend=str(backend_key),
-            device_id=int(device_id),
-            mode=str(decode_mode),
+            decode_backend=str(backend_key),
+            decode_device_id=int(decode_device_id),
             uniform_strategy=str(uniform_strategy),
             nvdec_session_pool_size=-1
             if nvdec_session_pool_size is None
@@ -68,10 +68,10 @@ def decode_uniform_frames_core(
         )
     else:
         out = decode_fn(
-            video_path=str(video_path),
-            sequence_length=int(sequence_length),
-            device_id=int(device_id),
-            mode=str(decode_mode),
+            str(video_path),
+            int(sequence_length),
+            int(decode_device_id),
+            "throughput",
         )
     return DecodedFrames(
         frames=out["frames"],

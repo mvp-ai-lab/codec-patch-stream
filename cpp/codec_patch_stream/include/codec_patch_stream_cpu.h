@@ -13,7 +13,10 @@ namespace codec_patch_stream {
 
 struct StreamConfig {
   int64_t sequence_length = 16;
-  std::string decode_mode = "throughput";
+  std::string decode_backend = "auto";
+  std::string process_backend = "auto";
+  int64_t decode_device_id = 0;
+  int64_t process_device_id = 0;
   std::string uniform_strategy = "auto";
   int64_t input_size = 224;
   int64_t min_pixels = -1;
@@ -27,7 +30,6 @@ struct StreamConfig {
   double static_rel_thresh = 0.15;
   int64_t static_uniform_frames = 4;
   double energy_pct = 95.0;
-  int64_t device_id = 0;
   int64_t prefetch_depth = 3;
   int64_t nvdec_session_pool_size = -1;
   int64_t uniform_auto_ratio = -1;
@@ -122,10 +124,10 @@ class CodecPatchStreamNative {
   void materialize_metadata_cpu_cache() const;
 
   std::string video_path_;
-  StreamConfig cfg_;
+ StreamConfig cfg_;
   at::Tensor patch_bank_;
-  at::Tensor metadata_fields_cpu_;
-  at::Tensor metadata_scores_cpu_;
+  at::Tensor metadata_fields_gpu_;
+  at::Tensor metadata_scores_gpu_;
   std::vector<int64_t> sampled_frame_ids_;
   double fps_ = 0.0;
   double duration_sec_ = 0.0;

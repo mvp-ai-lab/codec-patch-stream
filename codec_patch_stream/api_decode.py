@@ -8,9 +8,8 @@ def decode_only(config: DecodeConfig) -> DecodedFrames:
     return decode_uniform_frames_core(
         video_path=config.video_path,
         sequence_length=int(config.sequence_length),
-        backend=str(config.backend),
-        device_id=int(config.device_id),
-        decode_mode=str(config.decode_mode),
+        decode_backend=str(config.decode_backend),
+        decode_device_id=int(config.decode_device_id),
         uniform_strategy=str(config.uniform_strategy),
         nvdec_session_pool_size=config.nvdec_session_pool_size,
         uniform_auto_ratio=config.uniform_auto_ratio,

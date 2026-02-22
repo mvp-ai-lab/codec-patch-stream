@@ -14,7 +14,6 @@ class NativePatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | boo
         self,
         video_path: str,
         sequence_length: int = 16,
-        decode_mode: str = "throughput",
         uniform_strategy: str = "auto",
         input_size: int = 224,
         min_pixels: int | None = None,
@@ -28,9 +27,11 @@ class NativePatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | boo
         static_uniform_frames: int = 4,
         energy_pct: float = 95.0,
         output_dtype: str = "bfloat16",
-        device_id: int = 0,
+        decode_device_id: int = 0,
+        process_device_id: int = 0,
         prefetch_depth: int = 3,
-        backend: str = "auto",
+        decode_backend: str = "auto",
+        process_backend: str = "auto",
         nvdec_session_pool_size: int | None = None,
         uniform_auto_ratio: int | None = None,
         decode_threads: int | None = None,
@@ -38,11 +39,10 @@ class NativePatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | boo
         reader_cache_size: int | None = None,
         nvdec_reuse_open_decoder: bool | None = None,
     ):
-        native = load_native_backend(backend)
+        native = load_native_backend("auto")
         self._native = native.CodecPatchStreamNative(
             video_path=video_path,
             sequence_length=int(sequence_length),
-            decode_mode=str(decode_mode),
             uniform_strategy=str(uniform_strategy),
             input_size=int(input_size),
             min_pixels=-1 if min_pixels is None else int(min_pixels),
@@ -56,9 +56,11 @@ class NativePatchStream(Iterator[Tuple[torch.Tensor, Dict[str, int | float | boo
             static_uniform_frames=int(static_uniform_frames),
             energy_pct=float(energy_pct),
             output_dtype=str(output_dtype),
-            device_id=int(device_id),
+            decode_backend=str(decode_backend),
+            process_backend=str(process_backend),
+            decode_device_id=int(decode_device_id),
+            process_device_id=int(process_device_id),
             prefetch_depth=int(prefetch_depth),
-            backend=str(backend),
             nvdec_session_pool_size=-1
             if nvdec_session_pool_size is None
             else int(nvdec_session_pool_size),

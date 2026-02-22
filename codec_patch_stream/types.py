@@ -24,9 +24,8 @@ class DecodedFrames:
 class DecodeConfig:
     video_path: str | Path
     sequence_length: int = 16
-    backend: str = "auto"
-    device_id: int = 0
-    decode_mode: str = "throughput"
+    decode_backend: str = "auto"
+    decode_device_id: int = 0
     uniform_strategy: str = "auto"
     nvdec_session_pool_size: int | None = None
     uniform_auto_ratio: int | None = None
@@ -40,7 +39,6 @@ class DecodeConfig:
 class PatchStreamConfig:
     video_path: str | Path
     sequence_length: int = 16
-    decode_mode: str = "throughput"
     uniform_strategy: str = "auto"
     input_size: int = 224
     min_pixels: int | None = None
@@ -54,8 +52,10 @@ class PatchStreamConfig:
     static_uniform_frames: int = 4
     energy_pct: float = 95.0
     output_dtype: str = "bfloat16"
-    backend: str = "auto"
-    device_id: int = 0
+    decode_backend: str = "auto"
+    process_backend: str = "auto"
+    decode_device_id: int = 0
+    process_device_id: int = 0
     prefetch_depth: int = 3
     nvdec_session_pool_size: int | None = None
     uniform_auto_ratio: int | None = None

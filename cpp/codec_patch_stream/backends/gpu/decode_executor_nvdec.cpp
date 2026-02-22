@@ -816,6 +816,19 @@ size_t frame_index_cache_limit() {
   return static_cast<size_t>(v);
 }
 
+int64_t effective_uniform_auto_stream_ratio(int64_t base_ratio, int64_t sequence_length) {
+  // Dense sampling tends to favor stream decode on NVDEC because repeated
+  // seek+flush incurs high fixed overhead. Keep low-seq behavior unchanged.
+  const bool enable_dense_adapt =
+      parse_env_bool("CODEC_DECODE_UNIFORM_AUTO_DENSE_ADAPT", true);
+  if (!enable_dense_adapt) {
+    return base_ratio;
+  }
+  const int64_t dense_ratio = std::max<int64_t>(
+      int64_t{12}, std::min<int64_t>(int64_t{128}, sequence_length / 4));
+  return std::max(base_ratio, dense_ratio);
+}
+
 void evict_frame_index_cache_locked(size_t limit) {
   if (limit == 0) {
     frame_index_cache().clear();
@@ -1444,6 +1457,9 @@ DecodeResult decode_uniform_frames_nvdec(const std::string& video_path,
     AVStream* video_stream = fmt_ctx->streams[video_stream_idx];
     const std::string uniform_mode =
         parse_env_string("CODEC_DECODE_UNIFORM_NVDEC_MODE", "auto");
+    const bool auto_uniform_mode = (uniform_mode == "auto");
+    int64_t quick_total_frames = -1;
+    int64_t auto_stream_ratio = -1;
     if (uniform_mode == "stream") {
       if (fmt_ctx) {
         avformat_close_input(&fmt_ctx);
@@ -1455,10 +1471,13 @@ DecodeResult decode_uniform_frames_nvdec(const std::string& video_path,
           "CODEC_DECODE_UNIFORM_NVDEC_MODE must be one of: auto, seek, stream");
     }
     if (uniform_mode == "auto") {
-      const int64_t quick_total_frames = estimate_total_frames_quick(fmt_ctx, video_stream);
-      const int64_t stream_ratio = parse_env_int64("CODEC_DECODE_UNIFORM_AUTO_RATIO", 12);
-      if (quick_total_frames > 0 && stream_ratio > 0 &&
-          quick_total_frames <= sequence_length * stream_ratio) {
+      quick_total_frames = estimate_total_frames_quick(fmt_ctx, video_stream);
+      const int64_t base_stream_ratio =
+          parse_env_int64("CODEC_DECODE_UNIFORM_AUTO_RATIO", 12);
+      auto_stream_ratio =
+          effective_uniform_auto_stream_ratio(base_stream_ratio, sequence_length);
+      if (quick_total_frames > 0 && auto_stream_ratio > 0 &&
+          quick_total_frames <= sequence_length * auto_stream_ratio) {
         if (fmt_ctx) {
           avformat_close_input(&fmt_ctx);
         }
@@ -1483,6 +1502,23 @@ DecodeResult decode_uniform_frames_nvdec(const std::string& video_path,
     const auto t_after_codec_open = std::chrono::steady_clock::now();
 
     const int64_t fallback_total_frames = estimate_total_frames(fmt_ctx, video_stream, dec_ctx);
+    if (auto_uniform_mode && quick_total_frames <= 0 && auto_stream_ratio > 0 &&
+        fallback_total_frames > 0 &&
+        fallback_total_frames <= sequence_length * auto_stream_ratio) {
+      if (frame) {
+        av_frame_unref(frame);
+      }
+      if (pkt) {
+        av_packet_unref(pkt);
+      }
+      if (persistent_lock.owns_lock()) {
+        persistent_lock.unlock();
+      }
+      if (fmt_ctx) {
+        avformat_close_input(&fmt_ctx);
+      }
+      return decode_sampled_frames_nvdec(video_path, sequence_length, device_id, mode);
+    }
     const double fps = infer_fps(video_stream, dec_ctx);
     const double duration_sec =
         infer_duration_sec(fmt_ctx, video_stream, fps, fallback_total_frames);

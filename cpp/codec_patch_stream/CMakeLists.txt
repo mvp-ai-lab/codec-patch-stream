@@ -36,10 +36,15 @@ if(CODEC_ENABLE_GPU)
       ../../python/codec_patch_stream_pybind_gpu.cpp
       core/decode_postprocess.cpp
       core/decode_core_gpu.cpp
+      core/decode_core_cpu.cpp
+      backends/cpu/decode_executor_ffmpeg_cpu.cpp
       backends/gpu/decode_executor_nvdec.cpp
       backends/gpu/nv12_to_rgb_kernels.cu
+      patch/energy_cpu.cpp
       patch/energy_gpu.cu
+      patch/select_cpu.cpp
       patch/select_gpu.cu
+      patch/extract_cpu.cpp
       patch/extract_gpu.cu
       patch/patch_stream_engine_gpu.cpp
   )

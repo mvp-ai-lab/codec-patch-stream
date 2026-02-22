@@ -21,10 +21,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       [](const std::string& video_path,
          int64_t sequence_length,
-         int64_t device_id,
-         const std::string& mode,
+         int64_t decode_device_id,
          const std::string& uniform_strategy,
-         const std::string& backend_name,
          int64_t nvdec_session_pool_size,
          int64_t uniform_auto_ratio,
          int64_t decode_threads,
@@ -34,9 +32,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         codec_patch_stream::DecodeRequest req;
         req.video_path = video_path;
         req.sequence_length = sequence_length;
-        req.backend = backend_name;
-        req.device_id = device_id;
-        req.decode_mode = mode;
+        req.decode_backend = "cpu";
+        req.decode_device_id = decode_device_id;
         req.uniform_strategy = uniform_strategy;
         req.nvdec_session_pool_size = nvdec_session_pool_size;
         req.uniform_auto_ratio = uniform_auto_ratio;

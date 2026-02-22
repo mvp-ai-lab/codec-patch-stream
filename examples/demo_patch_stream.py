@@ -19,7 +19,10 @@ def main() -> None:
     p.add_argument("--patch", type=int, default=14)
     p.add_argument("--topk", type=int, default=512)
     p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32", "bfloat16", "float16", "float32"])
-    p.add_argument("--backend", choices=["auto", "gpu", "cpu"], default="auto")
+    p.add_argument("--decode-backend", choices=["auto", "gpu", "cpu"], default="auto")
+    p.add_argument("--process-backend", choices=["auto", "gpu", "cpu"], default="auto")
+    p.add_argument("--decode-device-id", type=int, default=0)
+    p.add_argument("--process-device-id", type=int, default=0)
     p.add_argument("--out-dir", default="patch_viz")
     args = p.parse_args()
 
@@ -33,7 +36,10 @@ def main() -> None:
             patch_size=args.patch,
             k_keep=args.topk,
             output_dtype=args.dtype,
-            backend=args.backend,
+            decode_backend=args.decode_backend,
+            process_backend=args.process_backend,
+            decode_device_id=args.decode_device_id,
+            process_device_id=args.process_device_id,
             selection_unit="block2x2",
             static_fallback=False,
             energy_pct=95.0,

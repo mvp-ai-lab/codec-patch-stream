@@ -13,7 +13,10 @@ namespace codec_patch_stream {
 
 struct StreamConfig {
   int64_t sequence_length = 16;
-  std::string decode_mode = "throughput";
+  std::string decode_backend = "auto";
+  std::string process_backend = "auto";
+  int64_t decode_device_id = 0;
+  int64_t process_device_id = 0;
   std::string uniform_strategy = "auto";
   int64_t input_size = 224;
   int64_t min_pixels = -1;
@@ -27,7 +30,6 @@ struct StreamConfig {
   double static_rel_thresh = 0.15;
   int64_t static_uniform_frames = 4;
   double energy_pct = 95.0;
-  int64_t device_id = 0;
   int64_t prefetch_depth = 3;
   int64_t nvdec_session_pool_size = -1;
   int64_t uniform_auto_ratio = -1;
@@ -83,6 +85,7 @@ void launch_nv12_to_rgb_cuda(const uint8_t* y_plane,
                              void* stream);
 
 at::Tensor compute_energy_maps_cuda(const at::Tensor& frames_rgb_u8,
+                                    const at::Tensor& mv_magnitude_maps,
                                     const std::vector<uint8_t>& is_i_positions,
                                     double energy_pct);
 

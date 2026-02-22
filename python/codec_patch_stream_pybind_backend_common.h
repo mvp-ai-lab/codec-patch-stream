@@ -89,24 +89,21 @@ inline void bind_backend_module(py::module_& m,
         py::arg("mode") = "throughput");
 
   m.def("decode_only_native",
-        [backend_name, decode_only_fn](const std::string& video_path,
-                                       int64_t sequence_length,
-                                       int64_t device_id,
-                                       const std::string& mode,
-                                       const std::string& uniform_strategy,
-                                       int64_t nvdec_session_pool_size,
-                                       int64_t uniform_auto_ratio,
-                                       int64_t decode_threads,
-                                       const std::string& decode_thread_type,
-                                       int64_t reader_cache_size,
-                                       int64_t nvdec_reuse_open_decoder) {
+        [decode_only_fn](const std::string& video_path,
+                         int64_t sequence_length,
+                         int64_t decode_device_id,
+                         const std::string& uniform_strategy,
+                         int64_t nvdec_session_pool_size,
+                         int64_t uniform_auto_ratio,
+                         int64_t decode_threads,
+                         const std::string& decode_thread_type,
+                         int64_t reader_cache_size,
+                         int64_t nvdec_reuse_open_decoder) {
           auto out = decode_only_fn(
               video_path,
               sequence_length,
-              device_id,
-              mode,
+              decode_device_id,
               uniform_strategy,
-              backend_name,
               nvdec_session_pool_size,
               uniform_auto_ratio,
               decode_threads,
@@ -124,8 +121,7 @@ inline void bind_backend_module(py::module_& m,
         },
         py::arg("video_path"),
         py::arg("sequence_length") = 16,
-        py::arg("device_id") = 0,
-        py::arg("mode") = "throughput",
+        py::arg("decode_device_id") = 0,
         py::arg("uniform_strategy") = "auto",
         py::arg("nvdec_session_pool_size") = -1,
         py::arg("uniform_auto_ratio") = -1,
@@ -140,7 +136,10 @@ inline void bind_backend_module(py::module_& m,
       m, "CodecPatchStreamNative", py::module_local())
       .def(py::init([](const std::string& video_path,
                        int64_t sequence_length,
-                       const std::string& decode_mode,
+                       const std::string& decode_backend,
+                       const std::string& process_backend,
+                       int64_t decode_device_id,
+                       int64_t process_device_id,
                        const std::string& uniform_strategy,
                        int64_t input_size,
                        int64_t min_pixels,
@@ -154,7 +153,6 @@ inline void bind_backend_module(py::module_& m,
                        int64_t static_uniform_frames,
                        double energy_pct,
                        const std::string& output_dtype,
-                       int64_t device_id,
                        int64_t prefetch_depth,
                        int64_t nvdec_session_pool_size,
                        int64_t uniform_auto_ratio,
@@ -164,7 +162,10 @@ inline void bind_backend_module(py::module_& m,
                        int64_t nvdec_reuse_open_decoder) {
              codec_patch_stream::StreamConfig cfg;
              cfg.sequence_length = sequence_length;
-             cfg.decode_mode = decode_mode;
+             cfg.decode_backend = decode_backend;
+             cfg.process_backend = process_backend;
+             cfg.decode_device_id = decode_device_id;
+             cfg.process_device_id = process_device_id;
              cfg.uniform_strategy = uniform_strategy;
              cfg.input_size = input_size;
              cfg.min_pixels = min_pixels;
@@ -178,7 +179,6 @@ inline void bind_backend_module(py::module_& m,
              cfg.static_uniform_frames = static_uniform_frames;
              cfg.energy_pct = energy_pct;
              cfg.output_dtype = parse_dtype(output_dtype);
-             cfg.device_id = device_id;
              cfg.prefetch_depth = prefetch_depth;
              cfg.nvdec_session_pool_size = nvdec_session_pool_size;
              cfg.uniform_auto_ratio = uniform_auto_ratio;
@@ -190,7 +190,10 @@ inline void bind_backend_module(py::module_& m,
            }),
            py::arg("video_path"),
            py::arg("sequence_length") = 16,
-           py::arg("decode_mode") = "throughput",
+           py::arg("decode_backend") = "auto",
+           py::arg("process_backend") = "auto",
+           py::arg("decode_device_id") = 0,
+           py::arg("process_device_id") = 0,
            py::arg("uniform_strategy") = "auto",
            py::arg("input_size") = 224,
            py::arg("min_pixels") = -1,
@@ -204,7 +207,6 @@ inline void bind_backend_module(py::module_& m,
            py::arg("static_uniform_frames") = 4,
            py::arg("energy_pct") = 95.0,
            py::arg("output_dtype") = "bfloat16",
-           py::arg("device_id") = 0,
            py::arg("prefetch_depth") = 3,
            py::arg("nvdec_session_pool_size") = -1,
            py::arg("uniform_auto_ratio") = -1,

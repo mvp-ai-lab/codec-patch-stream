@@ -5,17 +5,18 @@
 #include <cctype>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace py = pybind11;
 
 namespace {
 
-std::string normalize_backend(std::string backend) {
+std::string normalize_backend(std::string backend, const char* field_name = "backend") {
   std::transform(backend.begin(), backend.end(), backend.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
   });
   if (backend != "auto" && backend != "gpu" && backend != "cpu") {
-    throw std::invalid_argument("backend must be one of: auto, gpu, cpu");
+    throw std::invalid_argument(std::string(field_name) + " must be one of: auto, gpu, cpu");
   }
   return backend;
 }
@@ -36,30 +37,79 @@ py::object import_cpu_module() {
   return import_optional("codec_patch_stream._codec_patch_stream_cpu");
 }
 
-py::object resolve_backend_module(const std::string& backend) {
-  const std::string key = normalize_backend(backend);
-  if (key == "gpu") {
+bool torch_cuda_is_available() {
+  try {
+    auto torch = py::module_::import("torch");
+    return torch.attr("cuda").attr("is_available")().cast<bool>();
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+std::string resolve_decode_backend(std::string decode_backend) {
+  decode_backend = normalize_backend(std::move(decode_backend), "decode_backend");
+  if (decode_backend == "auto") {
+    return torch_cuda_is_available() ? "gpu" : "cpu";
+  }
+  return decode_backend;
+}
+
+std::string resolve_process_backend(std::string process_backend,
+                                    const std::string& resolved_decode_backend) {
+  process_backend = normalize_backend(std::move(process_backend), "process_backend");
+  if (process_backend == "auto") {
+    return resolved_decode_backend;
+  }
+  return process_backend;
+}
+
+void validate_device_id(const char* field_name, int64_t device_id) {
+  if (device_id < 0) {
+    throw std::invalid_argument(std::string(field_name) + " must be >= 0");
+  }
+}
+
+py::object resolve_decode_module(const std::string& resolved_decode_backend) {
+  if (resolved_decode_backend == "gpu") {
     auto gpu = import_gpu_module();
     if (!gpu.is_none()) {
       return gpu;
     }
-    throw std::runtime_error("GPU backend module is unavailable");
-  }
-  if (key == "cpu") {
-    auto cpu = import_cpu_module();
-    if (!cpu.is_none()) {
-      return cpu;
-    }
-    throw std::runtime_error("CPU backend module is unavailable");
+    throw std::runtime_error("decode_backend=gpu requested but GPU backend module is unavailable");
   }
 
+  auto cpu = import_cpu_module();
+  if (!cpu.is_none()) {
+    return cpu;
+  }
   auto gpu = import_gpu_module();
   if (!gpu.is_none()) {
     return gpu;
   }
+  throw std::runtime_error("decode_backend=cpu requested but no native backend modules are available");
+}
+
+py::object resolve_patch_stream_module(const std::string& resolved_decode_backend,
+                                       const std::string& resolved_process_backend) {
+  const bool need_gpu_module =
+      (resolved_decode_backend == "gpu") || (resolved_process_backend == "gpu");
+  if (need_gpu_module) {
+    auto gpu = import_gpu_module();
+    if (!gpu.is_none()) {
+      return gpu;
+    }
+    throw std::runtime_error("patch_stream combo decode=" + resolved_decode_backend +
+                             " process=" + resolved_process_backend +
+                             " requires GPU backend module, but it is unavailable");
+  }
+
   auto cpu = import_cpu_module();
   if (!cpu.is_none()) {
     return cpu;
+  }
+  auto gpu = import_gpu_module();
+  if (!gpu.is_none()) {
+    return gpu;
   }
   throw std::runtime_error("No available backend modules (gpu/cpu)");
 }
@@ -70,7 +120,10 @@ class CodecPatchStreamNativeDispatch {
  public:
   CodecPatchStreamNativeDispatch(const std::string& video_path,
                                  int64_t sequence_length,
-                                 const std::string& decode_mode,
+                                 const std::string& decode_backend,
+                                 const std::string& process_backend,
+                                 int64_t decode_device_id,
+                                 int64_t process_device_id,
                                  const std::string& uniform_strategy,
                                  int64_t input_size,
                                  int64_t min_pixels,
@@ -84,40 +137,47 @@ class CodecPatchStreamNativeDispatch {
                                  int64_t static_uniform_frames,
                                  double energy_pct,
                                  const std::string& output_dtype,
-                                 int64_t device_id,
                                  int64_t prefetch_depth,
                                  int64_t nvdec_session_pool_size,
                                  int64_t uniform_auto_ratio,
                                  int64_t decode_threads,
                                  const std::string& decode_thread_type,
                                  int64_t reader_cache_size,
-                                 int64_t nvdec_reuse_open_decoder,
-                                 const std::string& backend) {
-    py::object mod = resolve_backend_module(backend);
+                                 int64_t nvdec_reuse_open_decoder) {
+    const std::string resolved_decode_backend = resolve_decode_backend(decode_backend);
+    const std::string resolved_process_backend =
+        resolve_process_backend(process_backend, resolved_decode_backend);
+    validate_device_id("decode_device_id", decode_device_id);
+    validate_device_id("process_device_id", process_device_id);
+
+    py::object mod =
+        resolve_patch_stream_module(resolved_decode_backend, resolved_process_backend);
     impl_ = mod.attr("CodecPatchStreamNative")(video_path,
-                                                sequence_length,
-                                                decode_mode,
-                                                uniform_strategy,
-                                                input_size,
-                                                min_pixels,
-                                                max_pixels,
-                                                patch_size,
-                                                k_keep,
-                                                selection_unit,
-                                                static_fallback,
-                                                static_abs_thresh,
-                                                static_rel_thresh,
-                                                static_uniform_frames,
-                                                energy_pct,
-                                                output_dtype,
-                                                device_id,
-                                                prefetch_depth,
-                                                nvdec_session_pool_size,
-                                                uniform_auto_ratio,
-                                                decode_threads,
-                                                decode_thread_type,
-                                                reader_cache_size,
-                                                nvdec_reuse_open_decoder);
+                                               sequence_length,
+                                               resolved_decode_backend,
+                                               resolved_process_backend,
+                                               decode_device_id,
+                                               process_device_id,
+                                               uniform_strategy,
+                                               input_size,
+                                               min_pixels,
+                                               max_pixels,
+                                               patch_size,
+                                               k_keep,
+                                               selection_unit,
+                                               static_fallback,
+                                               static_abs_thresh,
+                                               static_rel_thresh,
+                                               static_uniform_frames,
+                                               energy_pct,
+                                               output_dtype,
+                                               prefetch_depth,
+                                               nvdec_session_pool_size,
+                                               uniform_auto_ratio,
+                                               decode_threads,
+                                               decode_thread_type,
+                                               reader_cache_size,
+                                               nvdec_reuse_open_decoder);
   }
 
   int64_t size() const {
@@ -181,15 +241,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       return !import_gpu_module().is_none();
     }
     if (key == "cpu") {
-      return !import_cpu_module().is_none();
+      return !import_cpu_module().is_none() || !import_gpu_module().is_none();
     }
     return !import_gpu_module().is_none() || !import_cpu_module().is_none();
   });
 
   m.def("version", []() {
     try {
-      py::object mod = resolve_backend_module("auto");
-      return mod.attr("version")().cast<std::string>();
+      auto gpu = import_gpu_module();
+      if (!gpu.is_none()) {
+        return gpu.attr("version")().cast<std::string>();
+      }
+      auto cpu = import_cpu_module();
+      if (!cpu.is_none()) {
+        return cpu.attr("version")().cast<std::string>();
+      }
+      return std::string("unavailable");
     } catch (const std::exception&) {
       return std::string("unavailable");
     }
@@ -198,9 +265,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("decode_only_native",
         [](const std::string& video_path,
            int64_t sequence_length,
-           const std::string& backend,
-           int64_t device_id,
-           const std::string& mode,
+           const std::string& decode_backend,
+           int64_t decode_device_id,
            const std::string& uniform_strategy,
            int64_t nvdec_session_pool_size,
            int64_t uniform_auto_ratio,
@@ -208,35 +274,35 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            const std::string& decode_thread_type,
            int64_t reader_cache_size,
            int64_t nvdec_reuse_open_decoder) {
-          py::object mod = resolve_backend_module(backend);
+          const std::string resolved_decode_backend = resolve_decode_backend(decode_backend);
+          validate_device_id("decode_device_id", decode_device_id);
+          py::object mod = resolve_decode_module(resolved_decode_backend);
           if (py::hasattr(mod, "decode_only_native")) {
             return mod.attr("decode_only_native")(video_path,
-                                                   sequence_length,
-                                                   device_id,
-                                                   mode,
-                                                   uniform_strategy,
-                                                   nvdec_session_pool_size,
-                                                   uniform_auto_ratio,
-                                                   decode_threads,
-                                                   decode_thread_type,
-                                                   reader_cache_size,
-                                                   nvdec_reuse_open_decoder)
+                                                  sequence_length,
+                                                  decode_device_id,
+                                                  uniform_strategy,
+                                                  nvdec_session_pool_size,
+                                                  uniform_auto_ratio,
+                                                  decode_threads,
+                                                  decode_thread_type,
+                                                  reader_cache_size,
+                                                  nvdec_reuse_open_decoder)
                 .cast<py::dict>();
           }
           if (py::hasattr(mod, "decode_uniform_frames")) {
             return mod.attr("decode_uniform_frames")(video_path,
-                                                      sequence_length,
-                                                      device_id,
-                                                      mode)
+                                                     sequence_length,
+                                                     decode_device_id,
+                                                     "throughput")
                 .cast<py::dict>();
           }
           throw std::runtime_error("backend module does not expose decode functions");
         },
         py::arg("video_path"),
         py::arg("sequence_length") = 16,
-        py::arg("backend") = "auto",
-        py::arg("device_id") = 0,
-        py::arg("mode") = "throughput",
+        py::arg("decode_backend") = "auto",
+        py::arg("decode_device_id") = 0,
         py::arg("uniform_strategy") = "auto",
         py::arg("nvdec_session_pool_size") = -1,
         py::arg("uniform_auto_ratio") = -1,
@@ -249,6 +315,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(py::init<const std::string&,
                     int64_t,
                     const std::string&,
+                    const std::string&,
+                    int64_t,
+                    int64_t,
                     const std::string&,
                     int64_t,
                     int64_t,
@@ -266,14 +335,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                     int64_t,
                     int64_t,
                     int64_t,
-                    int64_t,
                     const std::string&,
                     int64_t,
-                    int64_t,
-                    const std::string&>(),
+                    int64_t>(),
            py::arg("video_path"),
            py::arg("sequence_length") = 16,
-           py::arg("decode_mode") = "throughput",
+           py::arg("decode_backend") = "auto",
+           py::arg("process_backend") = "auto",
+           py::arg("decode_device_id") = 0,
+           py::arg("process_device_id") = 0,
            py::arg("uniform_strategy") = "auto",
            py::arg("input_size") = 224,
            py::arg("min_pixels") = -1,
@@ -287,15 +357,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("static_uniform_frames") = 4,
            py::arg("energy_pct") = 95.0,
            py::arg("output_dtype") = "bfloat16",
-           py::arg("device_id") = 0,
            py::arg("prefetch_depth") = 3,
            py::arg("nvdec_session_pool_size") = -1,
            py::arg("uniform_auto_ratio") = -1,
            py::arg("decode_threads") = -1,
            py::arg("decode_thread_type") = "",
            py::arg("reader_cache_size") = -1,
-           py::arg("nvdec_reuse_open_decoder") = -1,
-           py::arg("backend") = "auto")
+           py::arg("nvdec_reuse_open_decoder") = -1)
       .def("__len__", &CodecPatchStreamNativeDispatch::size)
       .def("reset", &CodecPatchStreamNativeDispatch::reset)
       .def("close", &CodecPatchStreamNativeDispatch::close)
